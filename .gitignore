@@ -198,3 +198,4 @@ Cargo.lock
 
 package.code-workspace
 target
+.history
