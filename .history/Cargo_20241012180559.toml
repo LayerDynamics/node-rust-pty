@@ -1,0 +1,29 @@
+[package]
+edition = "2021"
+name = "node-rust-pty"
+version = "0.0.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Default enable napi4 feature, see https://nodejs.org/api/n-api.html#node-api-version-matrix
+napi = { version = "3.4", features = ["tokio-runtime"] }
+napi-derive = "3.4"
+tokio = { version = "1.28", features = ["full"] }
+
+# For PTY functionalities on macOS
+objc = "0.2"
+libc = "0.2.159"
+log = "0.4.22"
+env_logger = "0.11.5"
+parking_lot = "0.12.3"
+crossbeam-channel = "0.5.13"
+bytes = "1.7.2"
+
+[build-dependencies]
+napi-build = "2.0.1"
+
+[profile.release]
+lto = true
+strip = "symbols"

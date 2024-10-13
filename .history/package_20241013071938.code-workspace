@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"rust-analyzer.procMacro.ignored": {
+			"napi-derive": [
+				"napi"
+			]
+		}
+	}
+}
