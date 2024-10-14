@@ -310,7 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { PtyHandle, testPtyHandleCreation } = nativeBinding
+const { PtyHandle, MultiplexerHandle } = nativeBinding
 
 module.exports.PtyHandle = PtyHandle
-module.exports.testPtyHandleCreation = testPtyHandleCreation
+module.exports.MultiplexerHandle = MultiplexerHandle

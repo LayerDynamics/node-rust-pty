@@ -14,8 +14,8 @@
   "license": "MIT",
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4",
-    "@xterm/xterm": "^5.5.0",
-    "ava": "^6.0.1"
+    "ava": "^6.0.1",
+    "pino": "^9.4.0"
   },
   "ava": {
     "timeout": "3m"
@@ -33,9 +33,9 @@
     "version": "napi version"
   },
   "optionalDependencies": {
-    "node-rust-pty-win32-x64-msvc": "0.0.0",
+    "node-rust-pty-darwin-arm64": "0.0.0",
     "node-rust-pty-darwin-x64": "0.0.0",
     "node-rust-pty-linux-x64-gnu": "0.0.0",
-    "node-rust-pty-darwin-arm64": "0.0.0"
+    "node-rust-pty-win32-x64-msvc": "0.0.0"
   }
 }
