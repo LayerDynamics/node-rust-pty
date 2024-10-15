@@ -1,45 +1,46 @@
 {
-  "name": "node-rust-pty",
-  "version": "0.1.02",
-  "main": "index.js",
-  "types": "index.d.ts",
-  "napi": {
-    "name": "node-rust-pty",
-    "triples": {
-      "defaults": true,
-      "additional": [
-        "aarch64-apple-darwin",
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu"
-      ]
-    }
-  },
-  "license": "MIT",
-  "devDependencies": {
-    "@napi-rs/cli": "^2.18.4",
-    "ava": "^6.0.1",
-    "pino": "^9.4.0"
-  },
-  "ava": {
-    "timeout": "3m"
-  },
-  "engines": {
-    "node": ">=10"
-  },
-  "scripts": {
-    "artifacts": "napi artifacts --release",
-    "build": "napi build --release --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin",
-    "build:debug": "napi build --platform",
-    "prepublishOnly": "napi prepublish -t npm --skip-gh-release",
-    "test": "ava --serial",
-    "universal": "napi universal",
-    "version": "napi version"
-  },
-  "optionalDependencies": {
-    "node-rust-pty-darwin-arm64": "0.1.0",
-    "node-rust-pty-darwin-x64": "0.1.0",
-    "node-rust-pty-linux-x64-gnu": "0.1.0",
-    "node-rust-pty-linux-arm64-gnu": "0.1.0",
-    "node-rust-pty-win32-x64-msvc": "0.1.0"
-  }
+	"name": "node-rust-pty",
+	"version": "0.1.02",
+	"main": "index.js",
+	"types": "index.d.ts",
+	"napi": {
+		"name": "node-rust-pty",
+		"triples": {
+			"defaults": true,
+			"additional": [
+				"aarch64-apple-darwin",
+				"x86_64-unknown-linux-gnu",
+				"aarch64-unknown-linux-gnu"
+			]
+		},
+		"prebuilds": "./npm/prebuilds"
+	},
+	"license": "MIT",
+	"devDependencies": {
+		"@napi-rs/cli": "^2.18.4",
+		"ava": "^6.0.1",
+		"pino": "^9.4.0"
+	},
+	"ava": {
+		"timeout": "3m"
+	},
+	"engines": {
+		"node": ">=10"
+	},
+	"scripts": {
+		"artifacts": "napi artifacts --release --output-dir ./npm/prebuilds",
+		"build": "napi build --release --output-dir ./npm/prebuilds --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin",
+		"build:debug": "napi build --platform --output-dir ./npm/prebuilds",
+		"prepublishOnly": "napi prepublish -t npm --skip-gh-release",
+		"test": "ava --serial",
+		"universal": "napi universal --output-dir ./npm/prebuilds",
+		"version": "napi version"
+	},
+	"optionalDependencies": {
+		"node-rust-pty-darwin-arm64": "0.1.0",
+		"node-rust-pty-darwin-x64": "0.1.0",
+		"node-rust-pty-linux-x64-gnu": "0.1.0",
+		"node-rust-pty-linux-arm64-gnu": "0.1.0",
+		"node-rust-pty-win32-x64-msvc": "0.1.0"
+	}
 }
