@@ -1,17 +1,23 @@
 {
-  "name": "node-rust-pty-darwin-x64",
-  "os": [
-    "darwin"
-  ],
-  "cpu": [
-    "x64"
-  ],
-  "main": "node-rust-pty.darwin-x64.node",
-  "files": [
-    "node-rust-pty.darwin-x64.node"
-  ],
-  "license": "MIT",
-  "engines": {
-    "node": ">= 10"
-  }
+	"name": "node-rust-pty-darwin-x64",
+	"version": "0.1.0",
+	"description": "Platform-specific binary for node-rust-pty on darwin-x64",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/layerdynamics/node-rust-pty.git"
+	},
+	"license": "MIT",
+	"os": [
+		"darwin"
+	],
+	"cpu": [
+		"x64"
+	],
+	"engines": {
+		"node": ">=10"
+	},
+	"main": "node-rust-pty.darwin-x64.node",
+	"files": [
+		"node-rust-pty.darwin-x64.node"
+	]
 }
