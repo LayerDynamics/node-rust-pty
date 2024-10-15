@@ -28,12 +28,12 @@
 		"node": ">=10"
 	},
 	"scripts": {
-		"artifacts": "napi artifacts --release --output-dir ./npm/prebuilds",
-		"build": "napi build --release --output-dir ./npm/prebuilds --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin",
-		"build:debug": "napi build --platform --output-dir ./npm/prebuilds",
+		"artifacts": "napi artifacts --release ./npm/prebuilds",
+		"build": "napi build --release --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin ./npm/prebuilds",
+		"build:debug": "napi build --platform ./npm/prebuilds",
 		"prepublishOnly": "napi prepublish -t npm --skip-gh-release",
 		"test": "ava --serial",
-		"universal": "napi universal --output-dir ./npm/prebuilds",
+		"universal": "napi universal ./npm/prebuilds",
 		"version": "napi version"
 	},
 	"optionalDependencies": {
