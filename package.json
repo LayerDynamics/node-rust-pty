@@ -1,11 +1,12 @@
 {
 	"name": "node-rust-pty",
-	"version": "0.0.0",
+	"version": "0.1.0",
 	"main": "index.js",
 	"types": "index.d.ts",
 	"napi": {
 		"name": "node-rust-pty",
 		"triples": {
+			"defaults": true,
 			"additional": [
 				"aarch64-apple-darwin"
 			]
@@ -21,7 +22,7 @@
 		"timeout": "3m"
 	},
 	"engines": {
-		"node": ">= 10"
+		"node": ">=10"
 	},
 	"scripts": {
 		"artifacts": "napi artifacts --config napi-rs-config.json",
@@ -34,9 +35,9 @@
 		"postinstall": "node postinstall.js"
 	},
 	"optionalDependencies": {
-		"node-rust-pty-darwin-arm64": "0.0.0",
-		"node-rust-pty-darwin-x64": "0.0.0",
-		"node-rust-pty-linux-x64-gnu": "0.0.0",
-		"node-rust-pty-win32-x64-msvc": "0.0.0"
+		"node-rust-pty-darwin-arm64": "0.1.0",
+		"node-rust-pty-darwin-x64": "0.1.0",
+		"node-rust-pty-linux-x64-gnu": "0.1.0",
+		"node-rust-pty-win32-x64-msvc": "0.1.0"
 	}
 }

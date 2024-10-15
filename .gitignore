@@ -199,3 +199,11 @@ $RECYCLE.BIN/
 package.code-workspace
 target
 .history
+
+# Exclude source files and build scripts
+src/
+build.rs
+Cargo.toml
+Cargo.lock
+napi-rs-config.json
+.github/
