@@ -31,8 +31,7 @@
 		"prepublishOnly": "napi prepublish -t npm --skip-gh-release --config napi-rs-config.json",
 		"test": "ava --serial",
 		"universal": "napi universal --config napi-rs-config.json",
-		"version": "napi version --config napi-rs-config.json",
-		"postinstall": "node postinstall.js"
+		"version": "napi version --config napi-rs-config.json"
 	},
 	"optionalDependencies": {
 		"node-rust-pty-darwin-arm64": "0.1.0",
