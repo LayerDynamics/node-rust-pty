@@ -25,13 +25,13 @@
 		"node": ">=10"
 	},
 	"scripts": {
-		"artifacts": "napi artifacts --config napi-rs-config.json",
-		"build": "napi build --platform --release --config napi-rs-config.json",
-		"build:debug": "napi build --platform --config napi-rs-config.json",
-		"prepublishOnly": "napi prepublish -t npm --skip-gh-release --config napi-rs-config.json",
+		"artifacts": "napi artifacts --release",
+		"build": "napi build --platform --release --release",
+		"build:debug": "napi build --platform",
+		"prepublishOnly": "napi prepublish -t npm --skip-gh-release",
 		"test": "ava --serial",
-		"universal": "napi universal --config napi-rs-config.json",
-		"version": "napi version --config napi-rs-config.json"
+		"universal": "napi universal",
+		"version": "napi version"
 	},
 	"optionalDependencies": {
 		"node-rust-pty-darwin-arm64": "0.1.0",
