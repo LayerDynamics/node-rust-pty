@@ -2,9 +2,7 @@
 pub mod command_handler;
 pub mod commands;
 pub mod handle;
-pub mod multiplexer; // Add the multiplexer module
-pub mod multiplexer_handle;
-
+pub mod multiplexer;
 #[cfg(target_os = "linux")]
 pub mod platform {
   pub use crate::platform::linux::PtyProcess;

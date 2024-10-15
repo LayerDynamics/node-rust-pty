@@ -11,3 +11,10 @@ yarn.lock
 .yarn
 __test__
 renovate.json
+./.DS_Store/**/*
+./.DS_Store
+.history/**
+.pytest_cache/**
+.vscode/**
+package.code-workspace
+target

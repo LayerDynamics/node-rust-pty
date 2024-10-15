@@ -1,10 +1,16 @@
 [package]
 edition = "2021"
 name = "node-rust-pty"
-version = "0.0.0"
+version = "0.1.0"
 
 [lib]
 crate-type = ["cdylib"]
+
+[features]
+[[bench]]
+name = "benchmark"
+harness = false
+
 
 [dependencies]
 # Default enable napi4 feature, see https://nodejs.org/api/n-api.html#node-api-version-matrix
@@ -23,9 +29,15 @@ bytes = "1.7.2"
 nix = "0.29.0"
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
+regex = "1.11.0"
+tokio-util = "0.7.12"
+futures = "0.3.29"
+futures-macro = "0.3.30"
+
 
 [dev-dependencies]
 serial_test = "3.1.1"
+criterion = "0.5.1"
 
 [build-dependencies]
 napi-build = "2.0.1"

@@ -1,15 +1,17 @@
 // src/platform/linux.rs
 
+use bytes::Bytes;
 use libc::{
   _exit, close, dup2, execle, fork, grantpt, ioctl, kill, open, posix_openpt, ptsname, read,
   setsid, unlockpt, waitpid, winsize, write, O_NOCTTY, O_RDWR, SIGKILL, SIGTERM, TIOCSWINSZ,
   WNOHANG,
 };
-use log::{debug, error};
+use log::{debug, error, info, warn};
 use std::ffi::CString;
 use std::io;
 use std::ptr;
 
+/// Extern declaration for environment variables
 extern "C" {
   pub static environ: *const *const libc::c_char;
 }
@@ -192,6 +194,8 @@ impl PtyProcess {
     let mut ws: winsize = unsafe { std::mem::zeroed() };
     ws.ws_col = cols;
     ws.ws_row = rows;
+    ws.ws_xpixel = 0;
+    ws.ws_ypixel = 0;
 
     let ret = unsafe { ioctl(self.master_fd, TIOCSWINSZ, &ws) };
     if ret != 0 {
@@ -248,5 +252,154 @@ impl PtyProcess {
     }
     debug!("Closed master_fd {}", self.master_fd);
     Ok(())
+  }
+
+  /// Forcefully kills the PTY process.
+  pub fn force_kill(&self) -> io::Result<()> {
+    info!("Forcefully killing PTY process {}.", self.pid);
+    self.kill_process(SIGKILL)
+  }
+
+  /// Sets an environment variable for the PTY process.
+  pub fn set_env(&mut self, key: String, value: String) -> io::Result<()> {
+    info!("Setting environment variable: {}={}", key, value);
+    // Note: Setting environment variables at runtime for the child process is non-trivial.
+    // Typically, environment variables should be set before spawning the child process.
+    // This method currently sets the environment variable for the current process.
+    // To affect the child PTY process, consider restarting the shell with updated environment.
+    std::env::set_var(&key, &value);
+    Ok(())
+  }
+
+  /// Changes the shell for the PTY process.
+  pub fn change_shell(&mut self, shell_path: String) -> io::Result<()> {
+    info!("Changing shell to {}", shell_path);
+    // Gracefully terminate the current shell
+    self.kill_process(SIGTERM)?;
+
+    // Wait for the process to terminate
+    match self.waitpid(0) {
+      Ok(_) => {
+        debug!("Successfully terminated old shell process {}", self.pid);
+      }
+      Err(e) => {
+        error!("Failed to waitpid after SIGTERM: {}", e);
+        // Proceeding to attempt to spawn a new shell
+      }
+    }
+
+    // Spawn a new shell
+    self.spawn_new_shell(shell_path)?;
+    Ok(())
+  }
+
+  /// Retrieves the status of the PTY process.
+  pub fn status(&self) -> io::Result<String> {
+    // Check if the process is still running
+    match unsafe { kill(self.pid, 0) } {
+      0 => Ok("Running".to_string()),
+      -1 => {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+          Ok("Not Running".to_string())
+        } else {
+          Err(err)
+        }
+      }
+      _ => Ok("Unknown".to_string()),
+    }
+  }
+
+  /// Sets the log level for the PTY process.
+  pub fn set_log_level(&self, level: String) -> io::Result<()> {
+    info!("Setting log level to {}", level);
+    // Map string level to log::LevelFilter
+    let level_filter = match level.to_lowercase().as_str() {
+      "error" => log::LevelFilter::Error,
+      "warn" => log::LevelFilter::Warn,
+      "info" => log::LevelFilter::Info,
+      "debug" => log::LevelFilter::Debug,
+      "trace" => log::LevelFilter::Trace,
+      _ => log::LevelFilter::Info, // Default level
+    };
+    log::set_max_level(level_filter);
+    Ok(())
+  }
+
+  /// Shuts down the PTY process gracefully.
+  pub fn shutdown_pty(&mut self) -> io::Result<()> {
+    info!("Shutting down PTY process {}", self.pid);
+    // Send SIGTERM to gracefully terminate the process
+    self.kill_process(SIGTERM)?;
+    // Wait for the process to terminate
+    match self.waitpid(0) {
+      Ok(_) => {
+        info!("PTY process {} terminated", self.pid);
+        // Close the master_fd
+        self.close_master_fd()?;
+        Ok(())
+      }
+      Err(e) => {
+        error!("Failed to waitpid during shutdown: {}", e);
+        // Attempt to force kill
+        self.force_kill()?;
+        self.close_master_fd()?;
+        Err(e)
+      }
+    }
+  }
+
+  /// Spawns a new shell process for the PTY.
+  fn spawn_new_shell(&mut self, shell_path: String) -> io::Result<()> {
+    info!("Spawning new shell: {}", shell_path);
+    // Close existing master_fd
+    self.close_master_fd()?;
+
+    // Open new PTY
+    let (new_master_fd, new_slave_fd) = Self::open_pty()?;
+    self.master_fd = new_master_fd;
+
+    let pid = unsafe { fork() };
+    match pid {
+      -1 => {
+        error!(
+          "Fork failed while spawning new shell: {}",
+          io::Error::last_os_error()
+        );
+        Self::cleanup_fd(new_master_fd, new_slave_fd);
+        return Err(io::Error::last_os_error());
+      }
+      0 => {
+        // Child process
+        Self::setup_child(new_slave_fd).unwrap_or_else(|e| {
+          error!("Failed to setup child during shell change: {}", e);
+          std::process::exit(1);
+        });
+        unreachable!(); // Ensures the child process does not continue
+      }
+      _ => {
+        // Parent process
+        debug!("In parent process on Linux, new child PID: {}", pid);
+        // Close slave_fd in parent
+        unsafe { close(new_slave_fd) };
+        self.pid = pid;
+        Ok(())
+      }
+    }
+  }
+
+  /// Checks if the PTY process is still running.
+  fn is_running(&self) -> io::Result<bool> {
+    match unsafe { kill(self.pid, 0) } {
+      0 => Ok(true),
+      -1 => {
+        if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+          Ok(false)
+        } else {
+          Err(io::Error::last_os_error())
+        }
+      }
+      _ => Ok(false),
+    }
   }
 }

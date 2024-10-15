@@ -1,6 +1,5 @@
 {
   "name": "node-rust-pty-darwin-x64",
-  "version": "0.0.0",
   "os": [
     "darwin"
   ],
