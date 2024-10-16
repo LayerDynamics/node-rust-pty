@@ -16,4 +16,3 @@ pub use platform::macos::PtyProcess;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use platform::unsupported::PtyProcess;
-
