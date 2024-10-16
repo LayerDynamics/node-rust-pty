@@ -10,13 +10,17 @@ let nativeBinding;
 try {
 	switch (platform) {
 		case 'darwin':
-			nativeBinding = await import(`../prebuild/darwin-${arch}/index.js`);
+			nativeBinding = await import(`../npm/prebuilds/darwin-${arch}/index.js`);
 			break;
 		case 'linux':
-			nativeBinding = await import(`../prebuild/linux-${arch}-gnu/index.js`);
+			nativeBinding = await import(
+				`../npm/prebuilds/linux-${arch}-gnu/index.js`
+			);
 			break;
 		case 'win32':
-			nativeBinding = await import(`../prebuild/win32-${arch}-msvc/index.js`);
+			nativeBinding = await import(
+				`../npm/prebuilds/win32-${arch}-msvc/index.js`
+			);
 			break;
 		default:
 			throw new Error(`Unsupported platform: ${platform}`);
@@ -157,9 +161,6 @@ test('MultiplexerHandle operations', async (t) => {
 		t.fail(`MultiplexerHandle operation failed: ${error.message}`);
 	}
 });
-
-
-
 
 test('basic read operation', async (t) => {
 	if (!t.context.ptyHandle) {

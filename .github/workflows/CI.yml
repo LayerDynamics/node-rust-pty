@@ -27,9 +27,11 @@ jobs:
         settings:
           - host: macos-latest
             target: x86_64-apple-darwin
+            move-to: npm/darwin-x64/
             build: npm run build -- --target x86_64-apple-darwin
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            move-to: npm/linux-x64-gnu/
             docker: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
             build: npm run build -- --target x86_64-unknown-linux-gnu
     name: stable - ${{ matrix.settings.target }} - node@20
@@ -75,11 +77,13 @@ jobs:
         run: ${{ matrix.settings.build }}
         if: ${{ !matrix.settings.docker }}
         shell: bash
+      - name: Move prebuilt files to correct folder
+        run: mv npm/prebuilds/* ${{ matrix.settings.move-to }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: npm/prebuilds/**/*.node  # Upload the generated node files from prebuilds
+          path: ${{ matrix.settings.move-to }}*.node
           if-no-files-found: error
 
   test-macOS-linux-binding:
@@ -92,8 +96,10 @@ jobs:
         settings:
           - host: macos-latest
             target: x86_64-apple-darwin
+            move-to: npm/darwin-x64/
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            move-to: npm/linux-x64-gnu/
         node:
           - '18'
           - '20'
