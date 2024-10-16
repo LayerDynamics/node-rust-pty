@@ -78,7 +78,7 @@ jobs:
         if: ${{ !matrix.settings.docker }}
         shell: bash
       - name: Move prebuilt files to correct folder
-        run: mv npm/prebuilds/* ${{ matrix.settings.move-to }}
+        run: sudo mv npm/prebuilds/* ${{ matrix.settings.move-to }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
