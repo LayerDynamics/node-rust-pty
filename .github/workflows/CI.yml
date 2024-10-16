@@ -144,7 +144,7 @@ jobs:
         with:
           path: npm/prebuilds
       - name: Move artifacts
-        run: npm run artifacts
+        run: sudo mv npm/prebuilds/* ./npm/
       - name: List packages
         run: ls -R ./npm
         shell: bash
