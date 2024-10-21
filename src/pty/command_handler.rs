@@ -5,7 +5,9 @@ use crate::pty::multiplexer::PtyMultiplexer;
 use crate::pty::platform::PtyProcess;
 use bytes::Bytes;
 use crossbeam_channel::Receiver;
+use futures::FutureExt;
 use log::{debug, error, info};
+use napi::bindgen_prelude::Buffer;
 use parking_lot::Mutex;
 use std::io;
 use std::sync::Arc;
@@ -61,6 +63,18 @@ pub fn handle_commands(
         Ok(command) => {
           debug!("Received command: {:?}", command);
           match command {
+            PtyCommand::CreateSession(responder) => {
+              handle_create_session(&multiplexer, responder).await;
+            }
+            PtyCommand::RemoveSession(session_id, responder) => {
+              handle_remove_session(&multiplexer, session_id, responder).await;
+            }
+            PtyCommand::CloseAllSessions(responder) => {
+              handle_close_all_sessions(&multiplexer, responder).await;
+            }
+            PtyCommand::ListSessions(responder) => {
+              handle_list_sessions(&multiplexer, responder).await;
+            }
             PtyCommand::Write(data, responder) => {
               handle_write(&pty, &data, responder);
             }
@@ -89,22 +103,25 @@ pub fn handle_commands(
               handle_close_master_fd(&pty, responder);
             }
             PtyCommand::Broadcast(data, responder) => {
-              handle_broadcast(&multiplexer, &data, responder);
+              handle_broadcast(&multiplexer, &data, responder).await;
+            }
+            PtyCommand::SendToSession(session_id, data, responder) => {
+              handle_send_to_session(&multiplexer, session_id, data, responder).await;
             }
             PtyCommand::ReadAll(sender) => {
               handle_read_all(&pty, sender);
             }
             PtyCommand::ReadFromSession(session_id, sender) => {
-              handle_read_from_session(&multiplexer, session_id, sender);
+              handle_read_from_session(&multiplexer, session_id, sender).await;
             }
             PtyCommand::ReadAllSessions(sender) => {
-              handle_read_all_sessions(&multiplexer, sender);
+              handle_read_all_sessions(&multiplexer, sender).await;
             }
             PtyCommand::MergeSessions(session_ids, sender) => {
-              handle_merge_sessions(&multiplexer, session_ids, sender);
+              handle_merge_sessions(&multiplexer, session_ids, sender).await;
             }
             PtyCommand::SplitSession(session_id, sender) => {
-              handle_split_session(&multiplexer, session_id, sender);
+              handle_split_session(&multiplexer, session_id, sender).await;
             }
             PtyCommand::SetEnv(key, value, sender) => {
               handle_set_env(&pty, key, value, sender);
@@ -134,6 +151,252 @@ pub fn handle_commands(
   });
 }
 
+/// Handles the `CreateSession` command by creating a new session in the multiplexer.
+///
+/// This function attempts to create a new session managed by the multiplexer.
+/// It locks the multiplexer, performs the create operation, and sends back a `PtyResult` indicating
+/// success or failure.
+///
+/// # Parameters
+///
+/// - `multiplexer`: A reference to a `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
+/// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
+async fn handle_create_session(
+  multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
+  responder: oneshot::Sender<PtyResult>,
+) {
+  debug!("Handling CreateSession command");
+
+  let create_result = {
+    let mut multiplexer_guard = multiplexer.lock();
+    if let Some(ref mut multiplexer) = *multiplexer_guard {
+      multiplexer.create_session().await.map_err(|e| {
+        io::Error::new(
+          io::ErrorKind::Other,
+          format!("Failed to create session: {}", e),
+        )
+      })
+    } else {
+      Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "Multiplexer not initialized",
+      ))
+    }
+  };
+
+  match create_result {
+    Ok(session_id) => {
+      info!("Created new session with ID {}", session_id);
+      let _ = responder.send(PtyResult::Success(format!("Session ID: {}", session_id)));
+    }
+    Err(e) => {
+      error!("Failed to create session: {}", e);
+      let _ = responder.send(PtyResult::Failure(format!("CreateSession error: {}", e)));
+    }
+  }
+}
+
+/// Handles the `RemoveSession` command by removing a session from the multiplexer.
+///
+/// This function attempts to remove the specified session from the multiplexer.
+/// It locks the multiplexer, performs the remove operation, and sends back a `PtyResult` indicating
+/// success or failure.
+///
+/// # Parameters
+///
+/// - `multiplexer`: A reference to a `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
+/// - `session_id`: A `u32` identifying the session to be removed.
+/// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
+async fn handle_remove_session(
+  multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
+  session_id: u32,
+  responder: oneshot::Sender<PtyResult>,
+) {
+  debug!("Handling RemoveSession command for session {}", session_id);
+
+  let remove_result = {
+    let mut multiplexer_guard = multiplexer.lock();
+    if let Some(ref mut multiplexer) = *multiplexer_guard {
+      multiplexer.remove_session(session_id).await.map_err(|e| {
+        io::Error::new(
+          io::ErrorKind::Other,
+          format!("Failed to remove session: {}", e),
+        )
+      })
+    } else {
+      Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "Multiplexer not initialized",
+      ))
+    }
+  };
+
+  match remove_result {
+    Ok(_) => {
+      info!("Removed session {}", session_id);
+      let _ = responder.send(PtyResult::Success(format!(
+        "Removed session {}",
+        session_id
+      )));
+    }
+    Err(e) => {
+      error!("Failed to remove session {}: {}", session_id, e);
+      let _ = responder.send(PtyResult::Failure(format!("RemoveSession error: {}", e)));
+    }
+  }
+}
+
+/// Handles the `SendToSession` command by sending data to a specific session in the multiplexer.
+///
+/// This function attempts to send the provided data to the specified session managed by the multiplexer.
+/// It locks the multiplexer, performs the send operation, and sends back a `PtyResult` indicating
+/// success or failure.
+///
+/// # Parameters
+///
+/// - `multiplexer`: A reference to an `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
+/// - `session_id`: A `u32` identifying the session to which the data should be sent.
+/// - `data`: A `Bytes` object containing the data to be sent.
+/// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
+async fn handle_send_to_session(
+  multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
+  session_id: u32,
+  data: Bytes,
+  responder: oneshot::Sender<PtyResult>,
+) {
+  debug!(
+    "Handling SendToSession command for session {} with {} bytes",
+    session_id,
+    data.len()
+  );
+
+  let send_result = {
+    let mut multiplexer_guard = multiplexer.lock();
+    if let Some(ref mut multiplexer) = *multiplexer_guard {
+      multiplexer
+        .send_to_session(session_id, Buffer::from(data.to_vec()))
+        .await
+        .map_err(|e| {
+          io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to send data to session {}: {}", session_id, e),
+          )
+        })
+    } else {
+      Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "Multiplexer not initialized",
+      ))
+    }
+  };
+
+  match send_result {
+    Ok(_) => {
+      info!("Sent data to session {}", session_id);
+      let _ = responder.send(PtyResult::Success(format!(
+        "Data sent to session {}",
+        session_id
+      )));
+    }
+    Err(e) => {
+      error!("Failed to send data to session {}: {}", session_id, e);
+      let _ = responder.send(PtyResult::Failure(format!("SendToSession error: {}", e)));
+    }
+  }
+}
+
+/// Handles the `CloseAllSessions` command by closing all active sessions in the multiplexer.
+///
+/// This function attempts to close all active sessions managed by the multiplexer.
+/// It locks the multiplexer, performs the close operations, and sends back a `PtyResult` indicating
+/// success or failure.
+///
+/// # Parameters
+///
+/// - `multiplexer`: A reference to a `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
+/// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
+async fn handle_close_all_sessions(
+  multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
+  responder: oneshot::Sender<PtyResult>,
+) {
+  debug!("Handling CloseAllSessions command");
+
+  let close_result = {
+    let mut multiplexer_guard = multiplexer.lock();
+    if let Some(ref mut multiplexer) = *multiplexer_guard {
+      multiplexer.close_all_sessions().await.map_err(|e| {
+        io::Error::new(
+          io::ErrorKind::Other,
+          format!("Failed to close all sessions: {}", e),
+        )
+      })
+    } else {
+      Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "Multiplexer not initialized",
+      ))
+    }
+  };
+
+  match close_result {
+    Ok(_) => {
+      info!("Closed all sessions successfully");
+      let _ = responder.send(PtyResult::Success(
+        "Closed all sessions successfully".to_string(),
+      ));
+    }
+    Err(e) => {
+      error!("Failed to close all sessions: {}", e);
+      let _ = responder.send(PtyResult::Failure(format!("CloseAllSessions error: {}", e)));
+    }
+  }
+}
+
+/// Handles the `ListSessions` command by listing all active sessions in the multiplexer.
+///
+/// This function attempts to retrieve a list of all active sessions managed by the multiplexer.
+/// It locks the multiplexer, retrieves the session list, and sends back a `PtyResult` containing
+/// the session IDs or an error.
+///
+/// # Parameters
+///
+/// - `multiplexer`: A reference to a `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
+/// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
+async fn handle_list_sessions(
+  multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
+  responder: oneshot::Sender<PtyResult>,
+) {
+  debug!("Handling ListSessions command");
+
+  let list_result = {
+    let multiplexer_guard = multiplexer.lock();
+    if let Some(ref multiplexer) = *multiplexer_guard {
+      multiplexer.list_sessions().await.map_err(|e| {
+        io::Error::new(
+          io::ErrorKind::Other,
+          format!("Failed to list sessions: {}", e),
+        )
+      })
+    } else {
+      Err(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "Multiplexer not initialized",
+      ))
+    }
+  };
+
+  match list_result {
+    Ok(sessions) => {
+      info!("Listed sessions successfully");
+      let _ = responder.send(PtyResult::Success(format!("Sessions: {:?}", sessions)));
+    }
+    Err(e) => {
+      error!("Failed to list sessions: {}", e);
+      let _ = responder.send(PtyResult::Failure(format!("ListSessions error: {}", e)));
+    }
+  }
+}
+
 /// Handles the `Write` command by writing data to the PTY process.
 ///
 /// This function attempts to write the provided data to the PTY process. It locks the PTY,
@@ -144,19 +407,6 @@ pub fn handle_commands(
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `data`: A reference to a `Bytes` object containing the data to be written.
 /// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use bytes::Bytes;
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let data = Bytes::from("Hello, PTY!");
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_write(&pty, &data, tx);
-/// ```
 fn handle_write(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   data: &Bytes,
@@ -196,17 +446,6 @@ fn handle_write(
 ///
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_read(&pty, tx);
-/// ```
 fn handle_read(pty: &Arc<Mutex<Option<PtyProcess>>>, responder: oneshot::Sender<PtyResult>) {
   debug!("Handling Read command");
   let read_result = {
@@ -249,17 +488,6 @@ fn handle_read(pty: &Arc<Mutex<Option<PtyProcess>>>, responder: oneshot::Sender<
 /// - `cols`: The desired number of columns for the PTY.
 /// - `rows`: The desired number of rows for the PTY.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_resize(&pty, 80, 24, tx);
-/// ```
 fn handle_resize(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   cols: u16,
@@ -305,18 +533,6 @@ fn handle_resize(
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `command`: A `String` containing the command to be executed.
 /// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let command = "ls -la".to_string();
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_execute(&pty, command, tx);
-/// ```
 fn handle_execute(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   command: String,
@@ -367,17 +583,6 @@ fn handle_execute(
 ///
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_close(&pty, tx);
-/// ```
 fn handle_close(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender<PtyResult>) {
   debug!("Handling Close command");
   let close_result = {
@@ -421,17 +626,6 @@ fn handle_close(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender<Pt
 ///
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_force_kill(&pty, tx);
-/// ```
 fn handle_force_kill(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender<PtyResult>) {
   debug!("Handling ForceKill command");
   let force_kill_result = {
@@ -480,18 +674,6 @@ fn handle_force_kill(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Send
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `signal`: An `i32` representing the signal number to be sent to the PTY process.
 /// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let signal = libc::SIGTERM;
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_kill_process(&pty, signal, tx);
-/// ```
 fn handle_kill_process(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   signal: i32,
@@ -536,18 +718,6 @@ fn handle_kill_process(
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `options`: An `i32` representing options for the waitpid system call.
 /// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let options = 0; // Example option
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_waitpid(&pty, options, tx);
-/// ```
 fn handle_waitpid(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   options: i32,
@@ -588,17 +758,6 @@ fn handle_waitpid(
 ///
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_close_master_fd(&pty, tx);
-/// ```
 fn handle_close_master_fd(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   responder: oneshot::Sender<PtyResult>,
@@ -641,20 +800,7 @@ fn handle_close_master_fd(
 /// - `multiplexer`: A reference to an `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
 /// - `data`: A reference to a `Bytes` object containing the data to be broadcasted.
 /// - `responder`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use bytes::Bytes;
-/// use tokio::sync::oneshot;
-///
-/// let multiplexer = Arc::new(Mutex::new(Some(PtyMultiplexer::new())));
-/// let data = Bytes::from("Broadcast message");
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_broadcast(&multiplexer, &data, tx);
-/// ```
-fn handle_broadcast(
+async fn handle_broadcast(
   multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
   data: &Bytes,
   responder: oneshot::Sender<PtyResult>,
@@ -663,12 +809,15 @@ fn handle_broadcast(
   let broadcast_result = {
     let mut multiplexer_guard = multiplexer.lock();
     if let Some(ref mut multiplexer) = *multiplexer_guard {
-      multiplexer.broadcast((&data[..]).into()).map_err(|e| {
-        io::Error::new(
-          io::ErrorKind::Other,
-          format!("Failed to broadcast data: {}", e),
-        )
-      })
+      multiplexer
+        .broadcast((&data[..]).into())
+        .await
+        .map_err(|e| {
+          io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to broadcast data: {}", e),
+          )
+        })
     } else {
       Err(io::Error::new(
         io::ErrorKind::BrokenPipe,
@@ -699,17 +848,6 @@ fn handle_broadcast(
 ///
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_read_all(&pty, tx);
-/// ```
 fn handle_read_all(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender<PtyResult>) {
   debug!("Handling ReadAll command");
   let read_all_result = {
@@ -751,19 +889,7 @@ fn handle_read_all(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender
 /// - `multiplexer`: A reference to an `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
 /// - `session_id`: A `u32` identifying the session from which to read data.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let multiplexer = Arc::new(Mutex::new(Some(PtyMultiplexer::new())));
-/// let session_id = 1;
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_read_from_session(&multiplexer, session_id, tx);
-/// ```
-fn handle_read_from_session(
+async fn handle_read_from_session(
   multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
   session_id: u32,
   sender: oneshot::Sender<PtyResult>,
@@ -775,17 +901,21 @@ fn handle_read_from_session(
 
   let multiplexer_guard = multiplexer.lock();
   if let Some(ref multiplexer) = *multiplexer_guard {
-    let data_result = multiplexer.read_from_session(session_id).map_err(|e| {
-      io::Error::new(
-        io::ErrorKind::Other,
-        format!("Failed to read from session {}: {}", session_id, e),
-      )
-    });
+    let data_result = multiplexer
+      .read_from_session(session_id)
+      .await
+      .map_err(|e| {
+        io::Error::new(
+          io::ErrorKind::Other,
+          format!("Failed to read from session {}: {}", session_id, e),
+        )
+      });
 
     match data_result {
       Ok(data) => {
+        let data_vec: Vec<u8> = data.to_vec();
         let _ = sender.send(PtyResult::Success(
-          String::from_utf8_lossy(&data).to_string(),
+          String::from_utf8_lossy(&data_vec).to_string(),
         ));
       }
       Err(e) => {
@@ -810,18 +940,7 @@ fn handle_read_from_session(
 ///
 /// - `multiplexer`: A reference to an `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let multiplexer = Arc::new(Mutex::new(Some(PtyMultiplexer::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_read_all_sessions(&multiplexer, tx);
-/// ```
-fn handle_read_all_sessions(
+async fn handle_read_all_sessions(
   multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
   sender: oneshot::Sender<PtyResult>,
 ) {
@@ -829,15 +948,16 @@ fn handle_read_all_sessions(
 
   let multiplexer_guard = multiplexer.lock();
   if let Some(ref multiplexer) = *multiplexer_guard {
-    let sessions_map = multiplexer
-      .read_all_sessions()
-      .map_err(|e| {
-        io::Error::new(
-          io::ErrorKind::Other,
-          format!("Failed to read sessions: {}", e),
-        )
-      })
-      .unwrap();
+    let sessions_map = match multiplexer.read_all_sessions().await {
+      Ok(sessions) => sessions,
+      Err(e) => {
+        let _ = sender.send(PtyResult::Failure(format!(
+          "Failed to read sessions: {}",
+          e
+        )));
+        return;
+      }
+    };
 
     let mut all_session_data = Vec::new();
     for session in sessions_map {
@@ -868,19 +988,7 @@ fn handle_read_all_sessions(
 /// - `multiplexer`: A reference to an `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
 /// - `session_ids`: A `Vec<u32>` containing the IDs of the sessions to be merged.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let multiplexer = Arc::new(Mutex::new(Some(PtyMultiplexer::new())));
-/// let session_ids = vec![1, 2, 3];
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_merge_sessions(&multiplexer, session_ids, tx);
-/// ```
-fn handle_merge_sessions(
+async fn handle_merge_sessions(
   multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
   session_ids: Vec<u32>,
   sender: oneshot::Sender<PtyResult>,
@@ -892,7 +1000,7 @@ fn handle_merge_sessions(
 
   let mut multiplexer_guard = multiplexer.lock();
   if let Some(ref mut multiplexer) = *multiplexer_guard {
-    let merge_result = multiplexer.merge_sessions(session_ids.clone());
+    let merge_result = multiplexer.merge_sessions(session_ids.clone()).await;
 
     match merge_result {
       Ok(_) => {
@@ -924,19 +1032,7 @@ fn handle_merge_sessions(
 /// - `multiplexer`: A reference to an `Arc<Mutex<Option<PtyMultiplexer>>>` representing the shared multiplexer.
 /// - `session_id`: A `u32` identifying the session to be split.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let multiplexer = Arc::new(Mutex::new(Some(PtyMultiplexer::new())));
-/// let session_id = 1;
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_split_session(&multiplexer, session_id, tx);
-/// ```
-fn handle_split_session(
+async fn handle_split_session(
   multiplexer: &Arc<Mutex<Option<PtyMultiplexer>>>,
   session_id: u32,
   sender: oneshot::Sender<PtyResult>,
@@ -945,7 +1041,7 @@ fn handle_split_session(
 
   let mut multiplexer_guard = multiplexer.lock();
   if let Some(ref mut multiplexer) = *multiplexer_guard {
-    let split_result = multiplexer.split_session(session_id);
+    let split_result = multiplexer.split_session(session_id).await;
 
     match split_result {
       Ok(_) => {
@@ -978,19 +1074,6 @@ fn handle_split_session(
 /// - `key`: A `String` representing the name of the environment variable to set.
 /// - `value`: A `String` representing the value to assign to the environment variable.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let key = "PATH".to_string();
-/// let value = "/usr/bin".to_string();
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_set_env(&pty, key, value, tx);
-/// ```
 fn handle_set_env(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   key: String,
@@ -1035,18 +1118,6 @@ fn handle_set_env(
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `shell_path`: A `String` representing the file system path to the new shell executable.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let shell_path = "/bin/zsh".to_string();
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_change_shell(&pty, shell_path, tx);
-/// ```
 fn handle_change_shell(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   shell_path: String,
@@ -1087,17 +1158,6 @@ fn handle_change_shell(
 ///
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_status(&pty, tx);
-/// ```
 fn handle_status(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender<PtyResult>) {
   debug!("Handling Status command");
   let status_result = {
@@ -1135,18 +1195,6 @@ fn handle_status(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender<P
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `level`: A `String` representing the desired logging level (e.g., "debug", "info").
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let level = "debug".to_string();
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_set_log_level(&pty, level, tx);
-/// ```
 fn handle_set_log_level(
   pty: &Arc<Mutex<Option<PtyProcess>>>,
   level: String,
@@ -1188,17 +1236,6 @@ fn handle_set_log_level(
 ///
 /// - `pty`: A reference to an `Arc<Mutex<Option<PtyProcess>>>` representing the shared PTY process.
 /// - `sender`: A `oneshot::Sender<PtyResult>` channel used to send back the result of the operation.
-///
-/// # Examples
-///
-/// ```rust
-/// use tokio::sync::oneshot;
-///
-/// let pty = Arc::new(Mutex::new(Some(PtyProcess::new())));
-/// let (tx, rx) = oneshot::channel();
-///
-/// handle_shutdown_pty(&pty, tx);
-/// ```
 fn handle_shutdown_pty(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender<PtyResult>) {
   debug!("Handling ShutdownPty command");
   let shutdown_result = {

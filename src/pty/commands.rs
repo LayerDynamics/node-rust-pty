@@ -39,6 +39,8 @@ pub enum PtyCommand {
   MergeSessions(Vec<u32>, oneshot::Sender<PtyResult>),
   /// Split a session into multiple sub-sessions.
   SplitSession(u32, oneshot::Sender<PtyResult>),
+	/// List all sessions
+	ListSessions(oneshot::Sender<PtyResult>),
   /// Set an environment variable.
   SetEnv(String, String, oneshot::Sender<PtyResult>),
   /// Change the shell for the PTY process.
@@ -49,6 +51,14 @@ pub enum PtyCommand {
   SetLogLevel(String, oneshot::Sender<PtyResult>),
   /// Shut down the PTY process gracefully.
   ShutdownPty(oneshot::Sender<PtyResult>),
+
+  CreateSession(oneshot::Sender<PtyResult>),
+
+  RemoveSession(u32, oneshot::Sender<PtyResult>),
+
+  CloseAllSessions(oneshot::Sender<PtyResult>),
+
+  SendToSession(u32, Bytes, oneshot::Sender<PtyResult>),
 }
 
 /// Enumeration of possible results from PTY operations.

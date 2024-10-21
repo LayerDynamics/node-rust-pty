@@ -3,6 +3,16 @@
 	"version": "0.1.02",
 	"main": "index.js",
 	"types": "index.d.ts",
+	"exports": {
+		".": {
+			"import": "./index.js",
+			"require": "./index.cjs"
+		},
+		"./node-rust-pty": {
+			"import": "./node-rust-pty.mjs",
+			"require": "./node-rust-pty.cjs"
+		}
+	},
 	"napi": {
 		"name": "node-rust-pty",
 		"triples": {

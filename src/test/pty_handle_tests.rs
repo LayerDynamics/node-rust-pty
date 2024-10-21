@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests {
   use crate::pty::handle::{MultiplexerHandle, PtyHandle};
+  use crate::utils::logging::initialize_logging;
   use log::error;
   use log::info;
   use serial_test::serial;
@@ -11,16 +12,10 @@ mod tests {
 
   use nix::libc::SIGTERM;
 
-  /// Helper function to initialize logging for tests
-  fn init_test_logging() {
-    use crate::utils::logging::initialize_logging;
-    initialize_logging();
-  }
-
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_create_pty_handle() {
-    init_test_logging();
+    initialize_logging();
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
 
     // Example: You might have a method to get the PID or other attributes
@@ -37,7 +32,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_write_to_pty() {
-    init_test_logging();
+    initialize_logging();
     let start_time = std::time::Instant::now();
 
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
@@ -68,7 +63,11 @@ mod tests {
     match read_result {
       Ok(Ok(data)) => {
         info!("test_write_to_pty: Data read from PTY: {}", data);
-        assert!(data.contains("test data"), "Incorrect data read from PTY");
+        assert!(
+          data.contains("test data"),
+          "Incorrect data read from PTY. Output: {}",
+          data
+        );
       }
       Ok(Err(e)) => {
         panic!("test_write_to_pty: Failed to read from PTY: {}", e);
@@ -87,7 +86,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_resize_pty() {
-    init_test_logging();
+    initialize_logging();
     let start_time = std::time::Instant::now();
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
     info!(
@@ -98,7 +97,7 @@ mod tests {
     // Resize the PTY
     let resize_start = std::time::Instant::now();
     pty_handle
-      .resize(80, 24)
+      .resize(40, 100)
       .await
       .expect("Failed to resize PTY");
     info!(
@@ -106,7 +105,54 @@ mod tests {
       resize_start.elapsed()
     );
 
-    info!("test_resize_pty: Resize operation successful.");
+    // Execute 'stty size' to verify the terminal size
+    let verify_start = std::time::Instant::now();
+    let verify_command = "stty size\n";
+    pty_handle
+      .write(verify_command.to_string())
+      .await
+      .expect("Failed to write verify command to PTY");
+    info!(
+      "test_resize_pty: Writing verify command took {:?}",
+      verify_start.elapsed()
+    );
+
+    // Read the output with a timeout
+    let read_start = std::time::Instant::now();
+    let read_result = time::timeout(Duration::from_secs(5), pty_handle.read()).await;
+    info!(
+      "test_resize_pty: Reading verification output took {:?}",
+      read_start.elapsed()
+    );
+
+    match read_result {
+      Ok(Ok(output)) => {
+        info!("test_resize_pty: Output after resize: '{}'", output.trim());
+        // Split the output into lines
+        let lines: Vec<&str> = output.trim().split('\n').collect();
+        // The first line is the echoed command, the second line should be the size
+        if lines.len() >= 2 {
+          let size_output = lines[1];
+          assert!(
+            size_output.contains("40 100"),
+            "Incorrect terminal size after resize. Expected '40 100', got '{}'",
+            size_output
+          );
+        } else {
+          panic!(
+            "Terminal size output incomplete. Expected at least 2 lines, got {}",
+            lines.len()
+          );
+        }
+      }
+      Ok(Err(e)) => {
+        panic!("test_resize_pty: Failed to read verification output: {}", e);
+      }
+      Err(_) => {
+        panic!("test_resize_pty: Read operation timed out");
+      }
+    }
+    info!("test_resize_pty: Completed in {:?}", start_time.elapsed());
 
     // Explicitly close the PTY handle
     pty_handle.close().await.expect("Failed to close PtyHandle");
@@ -116,7 +162,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_write_and_read_from_pty() {
-    init_test_logging();
+    initialize_logging();
     let start_time = std::time::Instant::now();
 
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
@@ -160,7 +206,8 @@ mod tests {
         );
         assert!(
           output.contains("hello"),
-          "PTY did not output expected 'hello'"
+          "PTY did not output expected 'hello'. Output: {}",
+          output
         );
       }
       Ok(Err(e)) => {
@@ -186,7 +233,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_kill_process() {
-    init_test_logging();
+    initialize_logging();
     let start_time = std::time::Instant::now();
 
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
@@ -239,7 +286,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_set_env() {
-    init_test_logging();
+    initialize_logging();
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
 
     // Set an environment variable
@@ -263,7 +310,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_execute_command() {
-    init_test_logging();
+    initialize_logging();
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
 
     // Execute a command and get the output
@@ -275,7 +322,8 @@ mod tests {
     // Verify the output
     assert!(
       output.contains("execute test"),
-      "Execute command did not return expected output"
+      "Execute command did not return expected output. Output: {}",
+      output
     );
 
     // Explicitly close the PTY handle
@@ -287,7 +335,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
   #[serial]
   async fn test_multiplexer_basic() {
-    init_test_logging();
+    initialize_logging();
     let start_time = std::time::Instant::now();
 
     let pty_handle = PtyHandle::new_for_test().expect("Failed to create PtyHandle");
@@ -349,13 +397,10 @@ mod tests {
     // Function to retry reading up to 15 times with delays and error logging
     async fn read_with_retries(
       multiplexer_handle: &MultiplexerHandle,
-      session_id: usize,
+      session_id: u32,
     ) -> Option<String> {
       for attempt in 1..=15 {
-        match multiplexer_handle
-          .read_from_session(session_id as u32)
-          .await
-        {
+        match multiplexer_handle.read_from_session(session_id).await {
           Ok(output) if !output.is_empty() => {
             return Some(output);
           }
@@ -378,9 +423,9 @@ mod tests {
       None
     }
 
-    // Read from session 1 (casting session1 to usize)
+    // Read from session 1
     let read_start1 = std::time::Instant::now();
-    let session1_output = read_with_retries(&multiplexer_handle, session1 as usize)
+    let session1_output = read_with_retries(&multiplexer_handle, session1)
       .await
       .expect("Failed to read from session 1 after multiple retries");
     info!(
@@ -395,9 +440,9 @@ mod tests {
       session1_output
     );
 
-    // Read from session 2 (casting session2 to usize)
+    // Read from session 2
     let read_start2 = std::time::Instant::now();
-    let session2_output = read_with_retries(&multiplexer_handle, session2 as usize)
+    let session2_output = read_with_retries(&multiplexer_handle, session2)
       .await
       .expect("Failed to read from session 2 after multiple retries");
     info!(
