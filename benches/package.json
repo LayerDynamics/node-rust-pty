@@ -1,0 +1,26 @@
+{
+  "name": "node-rust-pty-benches",
+  "version": "1.0.0",
+  "description": "",
+  "main": "benchmark.js",
+  "scripts": {
+    "test": "ava"
+  },
+  "dependencies": {
+    "ava": "^3.15.0"
+  },
+  "ava": {
+    "files": [
+      "test.js"
+    ],
+    "require": [
+      "./setup.js"
+    ],
+    "babel": false,
+    "extensions": [
+      "js",
+      "cjs"
+    ],
+    "timeout": "2m"
+  }
+}
