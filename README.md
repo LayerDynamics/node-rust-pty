@@ -20,7 +20,7 @@ const status = await pty.status();
 // Returns: "Running" | "Not Running" | "Unknown"
 
 // Graceful shutdown with timeout
-await pty.close({timeout: 5000}); 
+await pty.close({timeout: 5000});
 ```
 
 #### Platform-Specific Implementations
@@ -84,7 +84,7 @@ interface VElement {
 #### Diff Engine Implementation
 ```typescript
 // Available patch types
-type Patch = 
+type Patch =
   | { type: 'Replace'; node: VNode }
   | { type: 'UpdateProps'; props: Record<string, string> }
   | { type: 'AppendChild'; node: VNode }
@@ -133,8 +133,8 @@ const session2 = await pty.createSession();
 interface SessionOperations {
   // Send data to specific session
   sendToSession(
-    sessionId: number, 
-    data: Buffer, 
+    sessionId: number,
+    data: Buffer,
     options?: {
       flush?: boolean,      // Flush buffer immediately
       encoding?: string,    // Buffer encoding
@@ -287,7 +287,7 @@ npm install node-rust-pty
 yarn add node-rust-pty
 
 # Build from source
-git clone https://github.com/yourusername/node-rust-pty.git
+git clone https://github.com/layerdynamics/node-rust-pty.git
 cd node-rust-pty
 npm install
 npm run build
@@ -305,13 +305,13 @@ async function basicTerminal() {
 
   // Execute command
   await pty.sendToSession(session, Buffer.from('ls -la\n'));
-  
+
   // Read with timeout
   const output = await pty.readFromSession(session, {
     timeout: 1000,
     maxBytes: 4096
   });
-  
+
   console.log('Command output:', output);
   await pty.removeSession(session);
   await pty.close();
@@ -363,10 +363,10 @@ async function styledOutput() {
   // Render both nodes
   await pty.render(header);
   await pty.render(content);
-  
+
   // Execute command with styled output
   await pty.sendToSession(session, Buffer.from('echo "Hello World"\n'));
-  
+
   await pty.close();
 }
 ```
@@ -377,32 +377,32 @@ import { PtyHandle } from 'node-rust-pty';
 
 async function multiSession() {
   const pty = await PtyHandle.new();
-  
+
   // Create multiple sessions
   const sessions = await Promise.all([
     pty.createSession(),
     pty.createSession(),
     pty.createSession()
   ]);
-  
+
   // Send different commands to each session
   await Promise.all([
     pty.sendToSession(sessions[0], Buffer.from('echo "Session 1"\n')),
     pty.sendToSession(sessions[1], Buffer.from('echo "Session 2"\n')),
     pty.sendToSession(sessions[2], Buffer.from('echo "Session 3"\n'))
   ]);
-  
+
   // Read from all sessions
   const outputs = await Promise.all(
     sessions.map(sid => pty.readFromSession(sid))
   );
-  
+
   // Merge first two sessions
   await pty.mergeSessions([sessions[0], sessions[1]]);
-  
+
   // Split remaining session
   const [newSession1, newSession2] = await pty.splitSession(sessions[2]);
-  
+
   // Cleanup
   await pty.closeAllSessions();
   await pty.close();
