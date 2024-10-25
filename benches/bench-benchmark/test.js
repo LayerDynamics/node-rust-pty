@@ -1,4 +1,4 @@
-// benches/test.js
+// node-rust-pty/benches/test.js
 const test = require('ava')
 const fs = require('fs')
 const { exec: originalExec } = require('child_process')

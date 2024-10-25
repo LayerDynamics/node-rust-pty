@@ -7,6 +7,10 @@ pub mod multiplexer;
 pub mod output_handler;
 pub mod pty_renderer;
 
+pub use crate::pty::emulator::Emulator;
+pub use output_handler::PtyOutputHandler;
+pub use pty_renderer::PtyRenderer;
+
 #[cfg(target_os = "linux")]
 pub mod platform {
   pub use crate::platform::linux::PtyProcess;

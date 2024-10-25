@@ -28,6 +28,11 @@ use tokio::sync::oneshot;
 /// - `_result_sender`: A `crossbeam_channel::Sender<PtyResult>` channel intended for sending back results
 ///   (currently unused).
 ///
+/// # Behavior
+///
+/// - Processes each received `PtyCommand` accordingly.
+/// - Upon receiving a `ShutdownPty` command, it performs shutdown operations and exits the loop to terminate the thread.
+///
 /// # Examples
 ///
 /// ```rust
@@ -137,6 +142,8 @@ pub fn handle_commands(
             }
             PtyCommand::ShutdownPty(sender) => {
               handle_shutdown_pty(&pty, sender);
+              info!("ShutdownPty command processed. Exiting command handler loop.");
+              break; // Exit the loop to terminate the command handler thread
             }
           }
         }
@@ -467,7 +474,8 @@ fn handle_read(pty: &Arc<Mutex<Option<PtyProcess>>>, responder: oneshot::Sender<
   match read_result {
     Ok(data) => {
       info!("Read {} bytes from PTY", data.len());
-      let _ = responder.send(PtyResult::Data(data));
+      // Updated line: Convert Bytes to SerializableBytes using into()
+      let _ = responder.send(PtyResult::Data(data.into()));
     }
     Err(e) => {
       error!("Failed to read from PTY: {}", e);
@@ -869,7 +877,8 @@ fn handle_read_all(pty: &Arc<Mutex<Option<PtyProcess>>>, sender: oneshot::Sender
   match read_all_result {
     Ok(data) => {
       info!("Read {} bytes from PTY", data.len());
-      let _ = sender.send(PtyResult::Data(data));
+      // Updated line: Convert Bytes to SerializableBytes using into()
+      let _ = sender.send(PtyResult::Data(data.into()));
     }
     Err(e) => {
       error!("Failed to read from PTY: {}", e);
@@ -1229,8 +1238,7 @@ fn handle_set_log_level(
 ///
 /// This function attempts to gracefully shut down the PTY process by sending a `SIGTERM` signal,
 /// waiting for the process to terminate, and closing the master file descriptor.
-/// It locks the PTY, performs the shutdown operations, and sends back a `PtyResult` indicating
-/// success or failure.
+/// After performing the shutdown, it sends back a `PtyResult` indicating success or failure.
 ///
 /// # Parameters
 ///

@@ -91,39 +91,40 @@ impl PtyWorker {
 
     // Initialize a threadsafe function to communicate with JavaScript
     let threadsafe_fn = {
-      let tsfn: ThreadsafeFunction<WorkerMessage> = callback.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<WorkerMessage>| {
-        let worker_message = ctx.value;
+      let tsfn: ThreadsafeFunction<WorkerMessage> =
+        callback.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<WorkerMessage>| {
+          let worker_message = ctx.value;
 
-        // Create a JavaScript object to send as a message
-        let env = ctx.env;
-        let js_obj = match worker_message {
-          WorkerMessage::Ready => {
-            let mut obj = env.create_object()?;
-            obj.set("message_type", "READY")?;
-            obj.set("payload", env.get_null()?)?;
-            obj
-          }
-          WorkerMessage::Error(err) => {
-            let mut obj = env.create_object()?;
-            obj.set("message_type", "ERROR")?;
-            obj.set("payload", env.create_string(&err)?)?;
-            obj
-          }
-          WorkerMessage::DataReceived(session_id, data) => {
-            let mut obj = env.create_object()?;
-            obj.set("message_type", "DATA_RECEIVED")?;
-            let mut payload = env.create_object()?;
-            payload.set("session_id", session_id)?;
-            let js_buffer = env.create_buffer_with_data(data)?.into_raw();
-            payload.set("data", js_buffer)?;
-            obj.set("payload", payload)?;
-            obj
-          }
-        };
+          // Create a JavaScript object to send as a message
+          let env = ctx.env;
+          let js_obj = match worker_message {
+            WorkerMessage::Ready => {
+              let mut obj = env.create_object()?;
+              obj.set("message_type", "READY")?;
+              obj.set("payload", env.get_null()?)?;
+              obj
+            }
+            WorkerMessage::Error(err) => {
+              let mut obj = env.create_object()?;
+              obj.set("message_type", "ERROR")?;
+              obj.set("payload", env.create_string(&err)?)?;
+              obj
+            }
+            WorkerMessage::DataReceived(session_id, data) => {
+              let mut obj = env.create_object()?;
+              obj.set("message_type", "DATA_RECEIVED")?;
+              let mut payload = env.create_object()?;
+              payload.set("session_id", session_id)?;
+              let js_buffer = env.create_buffer_with_data(data)?.into_raw();
+              payload.set("data", js_buffer)?;
+              obj.set("payload", payload)?;
+              obj
+            }
+          };
 
-        // Return the JavaScript object wrapped in a Vec<JsUnknown>
-        Ok(vec![js_obj.into_unknown()])
-      })?;
+          // Return the JavaScript object wrapped in a Vec<JsUnknown>
+          Ok(vec![js_obj.into_unknown()])
+        })?;
 
       Arc::new(tsfn)
     };
@@ -142,7 +143,7 @@ impl PtyWorker {
     // Spawn the worker thread
     thread::spawn(move || {
       // Connect to the conout_pipe
-      let mut conout_socket = match TcpStream::connect(&conout_pipe_name_clone) {
+      let conout_socket = match TcpStream::connect(&conout_pipe_name_clone) {
         Ok(stream) => {
           info!("Connected to conout pipe: {}", conout_pipe_name_clone);
           stream

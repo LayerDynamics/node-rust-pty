@@ -28,8 +28,19 @@ use env_logger::{Builder, Env};
 use log::LevelFilter;
 
 /// Initializes logging using `env_logger`.
-/// Ensures that logging is initialized only once per application run.
-/// Uses `try_init` to avoid panics if the logger is already initialized.
+///
+/// This function sets up the global logger with a default log level of `Info`.
+/// The log level can be overridden by setting the `MY_LOG_LEVEL` environment variable.
+///
+/// **Important:** Ensure that this function is called only once during the application's lifetime.
+/// Subsequent calls will result in a warning message indicating that the logger has already been initialized.
+///
+/// # Examples
+///
+/// ```rust
+/// initialize_logging();
+/// log::info!("Logging has been initialized.");
+/// ```
 pub fn initialize_logging() {
   let env = Env::default().filter_or("MY_LOG_LEVEL", "info");
   if let Err(e) = Builder::from_env(env)

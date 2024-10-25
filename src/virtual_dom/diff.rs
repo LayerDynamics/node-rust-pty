@@ -1,5 +1,4 @@
 // src/virtual_dom/diff.rs
-use crate::virtual_dom::styles::style; // Import style correctly
 use crate::virtual_dom::VNode;
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
@@ -25,10 +24,6 @@ pub enum Patch {
 #[napi]
 impl Patch {
   /// Returns a description of the patch type.
-  ///
-  /// # Returns
-  ///
-  /// A `String` describing the type of patch.
   pub fn get_description(&self) -> String {
     match self {
       Patch::Replace(_) => "Replace".to_string(),
@@ -73,13 +68,17 @@ pub fn diff(old: &VNode, new: &VNode) -> Vec<Patch> {
         }
 
         // Diff children
-        let child_patches = diff_children(&old_elem.children, &new_elem.children);
-        patches.extend(child_patches);
+        patches.extend(diff_children(&old_elem.children, &new_elem.children));
       }
     }
     _ => {
       patches.push(Patch::Replace(new.clone()));
     }
+  }
+
+  // Remove any None patches unless it's the only patch
+  if patches.len() > 1 {
+    patches.retain(|p| !matches!(p, Patch::None));
   }
 
   patches
@@ -92,16 +91,23 @@ fn diff_props(
 ) -> HashMap<String, String> {
   let mut patches = HashMap::new();
 
+  // Find changed or new properties
   for (key, new_value) in new_props {
-    if old_props.get(key) != Some(new_value) {
-      patches.insert(key.clone(), new_value.clone());
+    match old_props.get(key) {
+      Some(old_value) if old_value != new_value => {
+        patches.insert(key.clone(), new_value.clone());
+      }
+      None => {
+        patches.insert(key.clone(), new_value.clone());
+      }
+      _ => {}
     }
   }
 
-  // Detect removed properties
+  // Find removed properties
   for key in old_props.keys() {
     if !new_props.contains_key(key) {
-      patches.insert(key.clone(), "".to_string()); // Empty string signifies removal
+      patches.insert(key.clone(), "".to_string());
     }
   }
 
@@ -111,24 +117,27 @@ fn diff_props(
 /// Compares two lists of children and returns the necessary patches.
 fn diff_children(old_children: &[VNode], new_children: &[VNode]) -> Vec<Patch> {
   let mut patches = Vec::new();
-  let max_len = old_children.len().max(new_children.len());
+  let mut i = 0;
 
-  for i in 0..max_len {
-    let old = old_children.get(i);
-    let new = new_children.get(i);
-
-    match (old, new) {
-      (Some(old_node), Some(new_node)) => {
-        patches.extend(diff(old_node, new_node));
-      }
-      (None, Some(new_node)) => {
-        patches.push(Patch::AppendChild(new_node.clone()));
-      }
-      (Some(_), None) => {
-        patches.push(Patch::RemoveChild(i));
-      }
-      (None, None) => {}
+  // First handle the overlapping children
+  while i < old_children.len() && i < new_children.len() {
+    if old_children[i] != new_children[i] {
+      // If the nodes are different, extend with their diff patches
+      patches.extend(diff(&old_children[i], &new_children[i]));
     }
+    i += 1;
+  }
+
+  // Handle any remaining new children that need to be appended
+  while i < new_children.len() {
+    patches.push(Patch::AppendChild(new_children[i].clone()));
+    i += 1;
+  }
+
+  // Handle any remaining old children that need to be removed
+  // Note: We remove from right to left to maintain correct indices
+  for j in (i..old_children.len()).rev() {
+    patches.push(Patch::RemoveChild(j));
   }
 
   patches
@@ -137,7 +146,7 @@ fn diff_children(old_children: &[VNode], new_children: &[VNode]) -> Vec<Patch> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::virtual_dom::{VElement, VNode};
+  use crate::virtual_dom::VElement;
   use std::collections::HashMap;
 
   #[test]
@@ -264,5 +273,32 @@ mod tests {
     let patches = diff(&old, &new);
     let expected_patch = vec![Patch::RemoveChild(1)];
     assert_eq!(patches, expected_patch);
+  }
+
+  #[test]
+  fn test_diff_complex_update() {
+    let old = VNode::element(
+      "div".to_string(),
+      HashMap::from([("class".to_string(), "container".to_string())]),
+      HashMap::new(),
+      vec![
+        VNode::text("Hello".to_string()),
+        VNode::element("span".to_string(), HashMap::new(), HashMap::new(), vec![]),
+      ],
+    );
+
+    let new = VNode::element(
+      "div".to_string(),
+      HashMap::from([("class".to_string(), "wrapper".to_string())]),
+      HashMap::new(),
+      vec![
+        VNode::text("Hello World".to_string()),
+        VNode::element("p".to_string(), HashMap::new(), HashMap::new(), vec![]),
+      ],
+    );
+
+    let patches = diff(&old, &new);
+    assert!(!patches.is_empty());
+    assert!(patches.iter().any(|p| matches!(p, Patch::UpdateProps(_))));
   }
 }

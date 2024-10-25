@@ -282,11 +282,8 @@ export interface SessionData {
   sessionId: number
   data: string
 }
-/** Struct to represent session data returned to JavaScript. */
 export interface SessionData {
-  /** The unique identifier of the session. */
   sessionId: number
-  /** The data associated with the session, represented as a `Buffer`. */
   data: Buffer
 }
 export declare function handleInput(): object | null
@@ -388,12 +385,12 @@ export declare class PtyHandle {
   getPid(): Promise<number>
   /** Example method that utilizes the PID */
   logPid(): Promise<void>
-  /** Reads data from the PTY asynchronously. */
-  read(): Promise<string>
   /** Writes data to the PTY asynchronously. */
   write(data: string): Promise<void>
   /** Resizes the PTY window asynchronously. */
   resize(cols: number, rows: number): Promise<void>
+  /** Reads data from the PTY asynchronously. */
+  read(): Promise<string>
   /** Executes a command in the PTY asynchronously. */
   execute(command: string): Promise<string>
   /** Gracefully shuts down the PTY process and closes all sessions. */
@@ -416,6 +413,12 @@ export declare class PtyHandle {
    * This method sends a command to close all active sessions managed by the multiplexer.
    */
   closeAllSessions(): Promise<void>
+  /**
+   * Lists all active sessions.
+   *
+   * This method retrieves a list of all active session IDs managed by the multiplexer.
+   */
+  listSessions(): Promise<Array<number>>
   /** Sends data to a specific session. */
   sendToSession(sessionId: number, data: Array<number>): Promise<void>
   /** Broadcasts data to all active sessions. */
@@ -445,403 +448,24 @@ export declare class PtyHandle {
   /** Shuts down the worker gracefully. */
   shutdownWorker(): void
 }
-/**
- * Multiplexer to handle multiple virtual streams on the same PTY.
- *
- * The `PtyMultiplexer` manages multiple `PtySession`s, allowing concurrent interactions
- * with a single PTY process. It provides functionalities to create, merge, split, and
- * manage sessions, as well as to handle PTY operations such as reading, writing, and
- * broadcasting data.
- */
 export declare class PtyMultiplexer {
-  /**
-   * Creates a new `PtyMultiplexer` with the given `PtyProcess`.
-   *
-   * # Parameters
-   *
-   * - `env`: The N-API environment.
-   * - `pty_process`: The `JsObject` representing the `PtyProcess`.
-   *
-   * # Errors
-   *
-   * Returns a `napi::Error` if the PTY process fails to initialize.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const { PtyMultiplexer } = require('./path_to_generated_napi_module');
-   * const ptyProcess = new PtyProcess();
-   * const multiplexer = new PtyMultiplexer(ptyProcess);
-   * ```
-   */
   constructor(ptyProcess: object)
-  /**
-   * Creates a new session and returns its stream ID.
-   *
-   * This method generates a unique stream ID for the new session, initializes its input and
-   * output buffers, and registers it within the multiplexer.
-   *
-   * # Returns
-   *
-   * - `u32`: The unique stream ID of the newly created session.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const sessionId = multiplexer.createSession();
-   * console.log(`Created session with ID: ${sessionId}`);
-   * ```
-   */
   createSession(): Promise<number>
-  /**
-   * Sends data to a specific session.
-   *
-   * This method appends the provided data to the input buffer of the specified session
-   * and writes it to the PTY process.
-   *
-   * # Parameters
-   *
-   * - `session_id`: The unique identifier of the session to which data will be sent.
-   * - `data`: The data to be sent to the session.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.sendToSession(sessionId, Buffer.from('Hello, Session!'));
-   * ```
-   */
   sendToSession(sessionId: number, data: Buffer): Promise<void>
-  /**
-   * Broadcasts data to all active sessions.
-   *
-   * This method appends the provided data to the input buffer of all active sessions
-   * and writes it to the PTY process.
-   *
-   * # Parameters
-   *
-   * - `data`: The data to be broadcasted to all sessions.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.broadcast(Buffer.from('Hello, All Sessions!'));
-   * ```
-   */
   broadcast(data: Buffer): Promise<void>
-  /**
-   * Reads data from a specific session.
-   *
-   * This method retrieves and clears the output buffer of the specified session,
-   * returning the accumulated data.
-   *
-   * # Parameters
-   *
-   * - `session_id`: The unique identifier of the session from which data will be read.
-   *
-   * # Returns
-   *
-   * - `Result<Buffer, napi::Error>`: Returns a `Buffer` containing the read data if successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const data = multiplexer.readFromSession(sessionId);
-   * console.log(`Data from session ${sessionId}:`, data.toString());
-   * ```
-   */
   readFromSession(sessionId: number): Promise<Buffer>
-  /**
-   * Reads data from all sessions.
-   *
-   * This method retrieves and clears the output buffers of all active sessions,
-   * returning a vector of `SessionData` objects.
-   *
-   * # Returns
-   *
-   * - `Result<Vec<SessionData>, napi::Error>`: Returns a vector of `SessionData` objects mapping session IDs to their read data if successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const allData = multiplexer.readAllSessions();
-   * allData.forEach(session => {
-   *     console.log(`Session ${session.session_id}: ${session.data.toString()}`);
-   * });
-   * ```
-   */
   readAllSessions(): Promise<Array<SessionData>>
-  /**
-   * Removes a specific session.
-   *
-   * This method deletes the specified session from the multiplexer, freeing up resources.
-   *
-   * # Parameters
-   *
-   * - `session_id`: The unique identifier of the session to be removed.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.removeSession(sessionId);
-   * ```
-   */
   removeSession(sessionId: number): Promise<void>
-  /**
-   * Merges multiple sessions into one.
-   *
-   * This method combines the input and output buffers of the specified sessions into the primary session,
-   * and removes the merged sessions from the multiplexer.
-   *
-   * # Parameters
-   *
-   * - `session_ids`: An array of session IDs to be merged. The first ID in the array is considered the primary session.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.mergeSessions([1, 2, 3]);
-   * ```
-   */
   mergeSessions(sessionIds: Array<number>): Promise<void>
-  /**
-   * Splits a session into two separate sessions.
-   *
-   * This method divides the input and output buffers of the specified session into two roughly equal parts,
-   * creating two new sessions and removing the original session from the multiplexer.
-   *
-   * # Parameters
-   *
-   * - `session_id`: The unique identifier of the session to be split.
-   *
-   * # Returns
-   *
-   * - `Result<[u32; 2], napi::Error>`: Returns an array containing the IDs of the two new sub-sessions if successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const [newSession1, newSession2] = multiplexer.splitSession(sessionId);
-   * console.log(`Split into sessions ${newSession1} and ${newSession2}`);
-   * ```
-   */
   splitSession(sessionId: number): Promise<number[]>
-  /**
-   * Sets an environment variable for the PTY process.
-   *
-   * This method updates the environment variable specified by `key` with the provided `value`.
-   *
-   * # Parameters
-   *
-   * - `key`: The name of the environment variable to set.
-   * - `value`: The value to assign to the environment variable.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.setEnv('PATH', '/usr/bin');
-   * ```
-   */
   setEnv(key: string, value: string): Promise<void>
-  /**
-   * Changes the shell of the PTY process.
-   *
-   * This method sends a command to the PTY process to replace the current shell with the specified one.
-   *
-   * # Parameters
-   *
-   * - `shell_path`: The file system path to the new shell executable.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.changeShell('/bin/zsh');
-   * ```
-   */
   changeShell(shellPath: string): Promise<void>
-  /**
-   * Retrieves the status of the PTY process.
-   *
-   * This method checks whether the PTY process is running or has terminated, and returns the status.
-   *
-   * # Returns
-   *
-   * - `Result<String, napi::Error>`: Returns a string indicating the status of the PTY process if successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const status = multiplexer.status();
-   * console.log(`PTY Status: ${status}`);
-   * ```
-   */
   status(): Promise<string>
-  /**
-   * Adjusts the logging level.
-   *
-   * This method sets the global logging level to the specified value.
-   * Valid levels include "error", "warn", "info", "debug", and "trace".
-   *
-   * # Parameters
-   *
-   * - `level`: The desired logging level.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.setLogLevel('debug');
-   * ```
-   */
   setLogLevel(level: string): Promise<void>
-  /**
-   * Closes all sessions within the multiplexer.
-   *
-   * This method removes all active sessions, effectively resetting the multiplexer.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.closeAllSessions();
-   * ```
-   */
   closeAllSessions(): Promise<void>
-  /**
-   * Gracefully shuts down the PTY process and closes all sessions.
-   *
-   * This method sends a `SIGTERM` signal to the PTY process, waits for it to terminate,
-   * and closes all active sessions.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.shutdownPty();
-   * ```
-   */
   shutdownPty(): Promise<void>
-  /**
-   * Forcefully shuts down the PTY process and closes all sessions.
-   *
-   * This method sends a `SIGKILL` signal to the PTY process, waits for it to terminate,
-   * and closes all active sessions.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.forceShutdownPty();
-   * ```
-   */
   forceShutdownPty(): Promise<void>
-  /**
-   * Resizes the PTY window.
-   *
-   * This method adjusts the number of columns and rows of the PTY, effectively changing the terminal size.
-   *
-   * # Parameters
-   *
-   * - `cols`: The number of columns for the PTY window.
-   * - `rows`: The number of rows for the PTY window.
-   *
-   * # Returns
-   *
-   * - `Result<(), napi::Error>`: Returns `Ok` if the resize operation is successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * multiplexer.resize(120, 40);
-   * ```
-   */
   resize(cols: number, rows: number): Promise<void>
-  /**
-   * Lists all active session IDs.
-   *
-   * This method retrieves the unique identifiers of all active sessions managed by the multiplexer.
-   *
-   * # Returns
-   *
-   * - `Result<Vec<u32>, napi::Error>`: Returns a vector of session IDs if successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const sessionIds = multiplexer.listSessions();
-   * console.log(`Active sessions: ${sessionIds.join(', ')}`);
-   * ```
-   */
-  listSessions(): Promise<Array<number>>
-  /**
-   * Handles the creation of a new session.
-   *
-   * This method is a wrapper around the `create_session` method, providing an asynchronous
-   * interface for creating a new session.
-   *
-   * # Returns
-   *
-   * - `Result<u32, napi::Error>`: Returns the unique stream ID of the newly created session if successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const sessionId = await multiplexer.handleCreateSession();
-   * console.log(`Created session with ID: ${sessionId}`);
-   * ```
-   */
-  handleCreateSession(): Promise<number>
-  /**
-   * Asynchronously reads data from PTY.
-   *
-   * This method reads available data from the PTY process and returns it as a byte array.
-   *
-   * # Returns
-   *
-   * - `Result<Buffer, napi::Error>`: Returns a `Buffer` containing the read data if successful, otherwise returns an error.
-   *
-   * # Examples
-   *
-   * ```javascript
-   * const data = await multiplexer.readFromPty();
-   * console.log(`Data from PTY: ${data.toString()}`);
-   * ```
-   */
   readFromPty(): Promise<Buffer>
 }
 /**
@@ -899,46 +523,15 @@ export declare class PtyRenderer {
    */
   processAndSend(sessionId: number, data: Buffer): void
 }
-/**
- * The Renderer applies changes from the Virtual DOM to the terminal.
- *
- * It maintains the current state of the Virtual DOM and applies necessary updates
- * to reflect changes efficiently.
- */
+/** The Renderer applies changes from the Virtual DOM to the terminal. */
 export declare class Renderer {
-  /** The current root of the Virtual DOM. */
   root: WrappedVNode
-  /** Creates a new Renderer with the given root `VNode`. */
   constructor(root: VirtualVNode)
-  /** Renders a new Virtual DOM by diffing it against the current one and applying patches. */
   render(newRoot: VirtualVNode): void
-  /** Clears the terminal screen. */
   clearScreen(): void
-  /**
-   * Removes a child node at the specified index.
-   *
-   * # Parameters
-   *
-   * - `index`: The index of the child to remove.
-   */
-  removeChild(index: number): void
-  /**
-   * Updates the text content of a text node.
-   *
-   * # Parameters
-   *
-   * - `new_text`: The new text content.
-   */
   updateText(newText: string): void
-  /**
-   * Updates the properties of an element.
-   *
-   * # Parameters
-   *
-   * - `props`: A reference to a `WrappedHashMap` containing the properties to update.
-   */
   updateProps(props: WrappedHashMap): void
-  /** Renders the entire Virtual DOM to the terminal. */
+  removeChild(index: number): void
   renderAll(): void
 }
 export declare class State {

@@ -1,0 +1,57 @@
+{
+	"name": "my-napi-package",
+	"triples": {
+		"defaults": true,
+		"additional": [
+			"aarch64-apple-darwin",
+			"x86_64-unknown-linux-musl",
+			"aarch64-unknown-linux-gnu",
+			"x86_64-apple-darwin"
+		]
+	},
+	"package": {
+		"name": "@my-scope/my-package"
+	},
+	"npmClient": "npm",
+	"binaryName": "my-binary",
+	"dts": "index.d.ts",
+	"js": {
+		"name": "index",
+		"dir": "lib",
+		"content": "import { loadBinding } from '@node-rs/helper'\n\nconst binding = loadBinding(__dirname, 'my-napi-package', 'my-napi-package')\n\nexport const { myExportedFunction } = binding\n"
+	},
+	"libName": "node-rust-pty",
+	"targetTriple": "x86_64-unknown-linux-gnu",
+	"cargo": {
+		"name": "node-rust-pty",
+		"manifestPath": "./Cargo.toml"
+	},
+	"features": ["feature1", "feature2"],
+	"napi": {
+		"version": 6
+	},
+	"platform": "darwin",
+	"architectures": ["x64", "arm64"],
+	"zig": {
+		"version": "0.10.1",
+		"abiSuffix": "2.17"
+	},
+	"msvcTargets": ["x64-msvc", "ia32-msvc"],
+	"apple": {
+		"minVersion": {
+			"macOS": "14.6.1"
+		}
+	},
+	"preBuild": [
+		"echo \"Running pre-build script\"",
+		"node ./scripts/pre-build.js"
+	],
+	"postBuild": [
+		"echo \"Running post-build script\"",
+		"node ./scripts/post-build.js"
+	],
+	"prepublish": [
+		"echo \"Running pre-publish script\"",
+		"node ./scripts/pre-publish.js"
+	]
+}

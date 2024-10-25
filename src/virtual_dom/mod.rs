@@ -22,6 +22,8 @@ pub use renderer::Renderer;
 pub use state::State;
 pub use styles::{styled_element, styled_text};
 pub use virtual_dom::{Styles as VDomStyles, VElement as VDomElement, VNode as VDomNode};
+pub use virtual_dom::VNode as VirtualVNode;
+pub use virtual_dom::VElement as VirtualElement;
 
 /// Represents the styles applied to a `VElement`.
 pub type Styles = HashMap<String, String>;

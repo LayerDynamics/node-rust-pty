@@ -1,56 +1,80 @@
 {
-	"name": "node-rust-pty",
-	"version": "0.1.02",
-	"main": "index.js",
-	"types": "index.d.ts",
-	"exports": {
-		".": {
-			"import": "./index.js",
-			"require": "./index.cjs"
-		},
-		"./node-rust-pty": {
-			"import": "./node-rust-pty.mjs",
-			"require": "./node-rust-pty.cjs"
-		}
-	},
-	"napi": {
-		"name": "node-rust-pty",
-		"triples": {
-			"defaults": true,
-			"additional": [
-				"aarch64-apple-darwin",
-				"x86_64-unknown-linux-gnu",
-				"aarch64-unknown-linux-gnu"
-			]
-		},
-		"prebuilds": "./npm/prebuilds"
-	},
-	"license": "MIT",
-	"devDependencies": {
-		"@napi-rs/cli": "^2.18.4",
-		"ava": "^6.0.1",
-		"pino": "^9.4.0"
-	},
-	"ava": {
-		"timeout": "3m"
-	},
-	"engines": {
-		"node": ">=10"
-	},
-	"scripts": {
-		"artifacts": "napi artifacts --release ./npm/prebuilds",
-		"build": "napi build --release --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin ./npm/prebuilds",
-		"build:debug": "napi build --platform ./npm/prebuilds",
-		"prepublishOnly": "napi prepublish -t npm --skip-gh-release",
-		"test": "ava --serial",
-		"universal": "napi universal ./npm/prebuilds",
-		"version": "napi version"
-	},
-	"optionalDependencies": {
-		"node-rust-pty-darwin-arm64": "0.1.0",
-		"node-rust-pty-darwin-x64": "0.1.0",
-		"node-rust-pty-linux-x64-gnu": "0.1.0",
-		"node-rust-pty-linux-arm64-gnu": "0.1.0",
-		"node-rust-pty-win32-x64-msvc": "0.1.0"
-	}
+  "name": "node-rust-pty",
+  "version": "0.1.1",
+  "main": "index.js",
+  "type": "module",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./node-rust-pty": {
+      "types": "./dist/node-rust-pty.d.ts",
+      "import": "./dist/node-rust-pty.mjs",
+      "require": "./dist/node-rust-pty.cjs"
+    }
+  },
+  "napi": {
+    "name": "node-rust-pty",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ]
+    },
+    "prebuilds": "./npm/prebuilds"
+  },
+  "license": "MIT",
+  "scripts": {
+    "artifacts": "napi artifacts --release ./npm/prebuilds",
+    "build": "napi build --release --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target aarch64-unknown-linux-gnu --target x86_64-apple-darwin ./npm/prebuilds",
+    "build:debug": "napi build --platform ./npm/prebuilds",
+    "build:ts": "tsc",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run clean && npm run build && npm run build:ts && napi prepublish -t npm --skip-gh-release",
+    "test": "ava --serial",
+    "universal": "napi universal ./npm/prebuilds",
+    "version": "napi version"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4",
+    "@swc-node/register": "^1.10.9",
+    "@types/node": "^20.16.14",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "ava": "^6.0.1",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.0",
+    "husky": "^9.1.6",
+    "pino": "^9.4.0",
+    "prettier": "^3.3.3",
+    "rimraf": "^5.0.10",
+    "typescript": "^5.6.3"
+  },
+  "ava": {
+    "timeout": "3m"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "dist",
+    "npm/prebuilds",
+    "package.json",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "node-rust-pty-darwin-arm64": "0.1.0",
+    "node-rust-pty-darwin-x64": "0.1.0",
+    "node-rust-pty-linux-arm64-gnu": "0.1.0",
+    "node-rust-pty-linux-x64-gnu": "0.1.0",
+    "node-rust-pty-win32-x64-msvc": "0.1.0"
+  },
+  "dependencies": {
+    "snappy": "^7.2.2"
+  }
 }

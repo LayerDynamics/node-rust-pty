@@ -1,4 +1,4 @@
-// benches/setup.js
+// node-rust-pty/benches/setup.js
 const fs = require('fs')
 const path = require('path')
 
@@ -10,7 +10,7 @@ fs.readdirSync = (dir) => {
   return []
 }
 
-// Mock the exec method
+// Mock the exec method without calling process.exit()
 const { exec: originalExec } = require('child_process')
 global.exec = (cmd, callback) => {
   if (cmd.includes('benchmark1.js')) {
@@ -18,6 +18,7 @@ global.exec = (cmd, callback) => {
   } else if (cmd.includes('benchmark2.js')) {
     callback(null, 'output2', '')
   } else {
+    // Instead of exiting, return an error through the callback
     callback(new Error('Unknown file'), '', 'error')
   }
 }

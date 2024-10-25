@@ -32,6 +32,8 @@ pub use platform::linux::PtyProcess;
 pub use platform::macos::PtyProcess;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+
+
 #[napi]
 pub fn run_terminal() -> napi::Result<()> {
   // Initialize the PTY Renderer

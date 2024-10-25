@@ -204,3 +204,5 @@ target
 
 
 .node/**/*
+DevDocuments/napi-rs_template_ts
+benche/node_modules

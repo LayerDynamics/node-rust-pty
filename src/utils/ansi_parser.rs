@@ -1,6 +1,6 @@
 // src/utils/ansi_parser.rs
 
-use crate::pty::emulator::PtyOutputHandler;
+use crate::pty::PtyOutputHandler;
 use crate::virtual_dom::key_state::KeyState;
 use crate::virtual_dom::state::State; // Ensure State is imported from the correct module
 use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
@@ -12,18 +12,16 @@ use vte::Perform;
 /// Struct to parse ANSI escape sequences and handle PTY output.
 pub struct ANSIParser {
   handler: Box<dyn PtyOutputHandler + Send>,
-  key_state: Arc<KeyState>,
 }
 
 impl ANSIParser {
-  /// Creates a new `ANSIParser` with the given PTY output handler and key state.
+  /// Creates a new `ANSIParser` with the given PTY output handler.
   ///
   /// # Parameters
   ///
   /// - `handler`: A boxed trait object implementing `PtyOutputHandler` and `Send`.
-  /// - `key_state`: An `Arc`-wrapped `KeyState` instance.
-  pub fn new(handler: Box<dyn PtyOutputHandler + Send>, key_state: Arc<KeyState>) -> Self {
-    ANSIParser { handler, key_state }
+  pub fn new(handler: Box<dyn PtyOutputHandler + Send>) -> Self {
+    ANSIParser { handler }
   }
 }
 

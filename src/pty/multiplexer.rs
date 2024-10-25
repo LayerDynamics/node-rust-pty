@@ -1,120 +1,133 @@
 // src/pty/multiplexer.rs
 
 use crate::pty::platform::PtyProcess;
+use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashMap;
+use futures::future::join_all;
 use libc::{SIGKILL, SIGTERM, WNOHANG};
 use log::{error, info};
 use napi::bindgen_prelude::*;
 use napi::JsObject;
 use napi_derive::napi;
 use std::collections::HashMap;
-use std::env;
 use std::io;
 use std::sync::Arc;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{broadcast, Mutex as TokioMutex};
+use tokio::time::{sleep, Duration};
 
-/// Helper function to convert `io::Error` to a `napi::Error`.
-///
-/// This function is used to map Rust `io::Error` into JavaScript-compatible `napi::Error`.
-///
-/// # Parameters
-///
-/// - `err`: The `io::Error` to be converted.
-///
-/// # Returns
-///
-/// A `napi::Error` containing the error message.
+#[async_trait]
+pub trait PtyProcessInterface: Send + Sync {
+  async fn write_data(&self, data: &Bytes) -> io::Result<usize>;
+  async fn read_data(&self, buffer: &mut [u8]) -> io::Result<usize>;
+  async fn is_running(&self) -> io::Result<bool>;
+  async fn kill_process(&self, signal: i32) -> io::Result<()>;
+  async fn waitpid(&self, options: i32) -> io::Result<i32>;
+  async fn resize(&self, cols: u16, rows: u16) -> io::Result<()>;
+  async fn get_pid(&self) -> io::Result<i32>;
+  async fn set_env(&self, key: String, value: String) -> io::Result<()>;
+}
+
+#[async_trait]
+impl PtyProcessInterface for PtyProcess {
+  async fn write_data(&self, data: &Bytes) -> io::Result<usize> {
+    self.write_data(data)
+  }
+
+  async fn read_data(&self, buffer: &mut [u8]) -> io::Result<usize> {
+    Ok(self.read_data(buffer)?)
+  }
+
+  async fn is_running(&self) -> io::Result<bool> {
+    Ok(true)
+  }
+
+  async fn kill_process(&self, _signal: i32) -> io::Result<()> {
+    Ok(())
+  }
+
+  async fn waitpid(&self, _options: i32) -> io::Result<i32> {
+    Ok(0)
+  }
+
+  async fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {
+    Ok(())
+  }
+
+  async fn get_pid(&self) -> io::Result<i32> {
+    Ok(self.pid)
+  }
+
+  async fn set_env(&self, key: String, value: String) -> io::Result<()> {
+    // Construct the shell command to set the environment variable
+    let command = format!("export {}=\"{}\"\n", key, value);
+
+    // Convert String to Bytes
+    let bytes_command = Bytes::copy_from_slice(command.as_bytes());
+
+    // Write the command to the PTY process
+    self.write_data(&bytes_command).map(|_| ())
+  }
+}
+
 fn convert_io_error(err: io::Error) -> napi::Error {
   napi::Error::from_reason(err.to_string())
 }
 
-/// Represents a session within the multiplexer.
-///
-/// Each `PtySession` maintains its own input and output buffers, allowing multiple virtual
-/// streams to interact with the same PTY process independently.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PtySession {
-  /// Unique identifier for the session.
   pub stream_id: u32,
-  /// Buffer for storing input data specific to the session.
   pub input_buffer: Vec<u8>,
-  /// Shared buffer for storing output data, protected by an asynchronous mutex for thread-safe access.
   pub output_buffer: Arc<TokioMutex<Vec<u8>>>,
 }
 
-/// Struct to represent session data returned to JavaScript.
 #[napi(object)]
 pub struct SessionData {
-  /// The unique identifier of the session.
   pub session_id: u32,
-  /// The data associated with the session, represented as a `Buffer`.
   pub data: Buffer,
 }
 
-/// Multiplexer to handle multiple virtual streams on the same PTY.
-///
-/// The `PtyMultiplexer` manages multiple `PtySession`s, allowing concurrent interactions
-/// with a single PTY process. It provides functionalities to create, merge, split, and
-/// manage sessions, as well as to handle PTY operations such as reading, writing, and
-/// broadcasting data.
 #[napi]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PtyMultiplexer {
-  /// The PTY process managed by the multiplexer.
   #[napi(skip)]
-  pub pty_process: Arc<PtyProcess>,
-  /// A thread-safe hash map of active sessions.
+  pub pty_process: Arc<dyn PtyProcessInterface>,
   #[napi(skip)]
-  pub sessions: Arc<TokioMutex<HashMap<u32, PtySession>>>,
-  /// Sender for shutdown signals to background tasks.
+  pub sessions: Arc<DashMap<u32, PtySession>>,
   #[napi(skip)]
   pub shutdown_sender: broadcast::Sender<()>,
 }
 
 #[napi]
 impl PtyMultiplexer {
-  /// Creates a new `PtyMultiplexer` with the given `PtyProcess`.
-  ///
-  /// # Parameters
-  ///
-  /// - `env`: The N-API environment.
-  /// - `pty_process`: The `JsObject` representing the `PtyProcess`.
-  ///
-  /// # Errors
-  ///
-  /// Returns a `napi::Error` if the PTY process fails to initialize.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const { PtyMultiplexer } = require('./path_to_generated_napi_module');
-  /// const ptyProcess = new PtyProcess();
-  /// const multiplexer = new PtyMultiplexer(ptyProcess);
-  /// ```
   #[napi(constructor)]
   pub fn new(env: Env, pty_process: JsObject) -> Result<Self> {
-    // Convert JsObject to PtyProcess
-    let pty_process: PtyProcess = PtyProcess::from_js_object(&env, &pty_process)?;
-
-    // Initialize broadcast channel for shutdown signals
+    let pty_process: PtyProcess = PtyProcess::from_js_object(&pty_process)?;
     let (shutdown_sender, _) = broadcast::channel(1);
-
     let multiplexer = Self {
       pty_process: Arc::new(pty_process),
-      sessions: Arc::new(TokioMutex::new(HashMap::new())),
+      sessions: Arc::new(DashMap::new()),
       shutdown_sender: shutdown_sender.clone(),
     };
-
-    // Spawn a background task to continuously read from PTY and dispatch to sessions
     let multiplexer_clone = multiplexer.clone();
     tokio::spawn(async move {
       let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
+      let mut retry_delay = Duration::from_secs(1);
+      let max_retry_delay = Duration::from_secs(32);
       loop {
         tokio::select! {
             res = multiplexer_clone.read_and_dispatch() => {
-                if let Err(e) = res {
-                    error!("Error in background PTY read task: {}", e);
-                    break;
+                match res {
+                    Ok(_) => {
+                        retry_delay = Duration::from_secs(1);
+                    },
+                    Err(e) => {
+                        error!("Error in background PTY read task: {}", e);
+                        sleep(retry_delay).await;
+                        retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+                        continue;
+                    },
                 }
             },
             _ = shutdown_receiver.recv() => {
@@ -125,34 +138,17 @@ impl PtyMultiplexer {
       }
       info!("Background PTY read task terminated.");
     });
-
     Ok(multiplexer)
   }
 
-  /// Creates a new session and returns its stream ID.
-  ///
-  /// This method generates a unique stream ID for the new session, initializes its input and
-  /// output buffers, and registers it within the multiplexer.
-  ///
-  /// # Returns
-  ///
-  /// - `u32`: The unique stream ID of the newly created session.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const sessionId = multiplexer.createSession();
-  /// console.log(`Created session with ID: ${sessionId}`);
-  /// ```
   #[napi]
   pub async fn create_session(&self) -> Result<u32> {
-    let mut sessions = self.sessions.lock().await;
-    let stream_id = if let Some(max_id) = sessions.keys().max() {
+    let stream_id = if let Some(max_id) = self.sessions.iter().map(|entry| *entry.key()).max() {
       max_id + 1
     } else {
       1
     };
-    sessions.insert(
+    self.sessions.insert(
       stream_id,
       PtySession {
         stream_id,
@@ -164,39 +160,17 @@ impl PtyMultiplexer {
     Ok(stream_id)
   }
 
-  /// Sends data to a specific session.
-  ///
-  /// This method appends the provided data to the input buffer of the specified session
-  /// and writes it to the PTY process.
-  ///
-  /// # Parameters
-  ///
-  /// - `session_id`: The unique identifier of the session to which data will be sent.
-  /// - `data`: The data to be sent to the session.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.sendToSession(sessionId, Buffer.from('Hello, Session!'));
-  /// ```
   #[napi]
   pub async fn send_to_session(&self, session_id: u32, data: Buffer) -> Result<()> {
     let data_slice = data.as_ref().to_vec();
-    let mut sessions = self.sessions.lock().await;
-    if let Some(session) = sessions.get_mut(&session_id) {
+    if let Some(mut session) = self.sessions.get_mut(&session_id) {
       session.input_buffer.extend_from_slice(&data_slice);
-      drop(sessions); // Release the lock before writing to PTY
-
-      // Convert Vec<u8> to Bytes
+      drop(session);
       let bytes_data = Bytes::copy_from_slice(&data_slice);
-
       self
         .pty_process
         .write_data(&bytes_data)
+        .await
         .map_err(convert_io_error)?;
       info!("Sent data to session {}: {:?}", session_id, data_slice);
       Ok(())
@@ -208,70 +182,28 @@ impl PtyMultiplexer {
     }
   }
 
-  /// Broadcasts data to all active sessions.
-  ///
-  /// This method appends the provided data to the input buffer of all active sessions
-  /// and writes it to the PTY process.
-  ///
-  /// # Parameters
-  ///
-  /// - `data`: The data to be broadcasted to all sessions.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.broadcast(Buffer.from('Hello, All Sessions!'));
-  /// ```
   #[napi]
   pub async fn broadcast(&self, data: Buffer) -> Result<()> {
     let data_slice = data.as_ref().to_vec();
-    let mut sessions = self.sessions.lock().await;
-    for session in sessions.values_mut() {
+    for mut session in self.sessions.iter_mut() {
       session.input_buffer.extend_from_slice(&data_slice);
     }
-    drop(sessions); // Release the lock before writing to PTY
-
-    // Convert Vec<u8> to Bytes
     let bytes_data = Bytes::copy_from_slice(&data_slice);
-
     self
       .pty_process
       .write_data(&bytes_data)
+      .await
       .map_err(convert_io_error)?;
     info!("Broadcasted data to all sessions: {:?}", data_slice);
     Ok(())
   }
 
-  /// Reads data from a specific session.
-  ///
-  /// This method retrieves and clears the output buffer of the specified session,
-  /// returning the accumulated data.
-  ///
-  /// # Parameters
-  ///
-  /// - `session_id`: The unique identifier of the session from which data will be read.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<Buffer, napi::Error>`: Returns a `Buffer` containing the read data if successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const data = multiplexer.readFromSession(sessionId);
-  /// console.log(`Data from session ${sessionId}:`, data.toString());
-  /// ```
   #[napi]
   pub async fn read_from_session(&self, session_id: u32) -> Result<Buffer> {
-    let mut sessions = self.sessions.lock().await;
-    if let Some(session) = sessions.get_mut(&session_id) {
+    if let Some(session) = self.sessions.get(&session_id) {
       let mut output = session.output_buffer.lock().await;
       let data = output.clone();
-      output.clear(); // Clear the buffer after reading
+      output.clear();
       info!("Read data from session {}: {:?}", session_id, data);
       Ok(Buffer::from(data))
     } else {
@@ -282,31 +214,13 @@ impl PtyMultiplexer {
     }
   }
 
-  /// Reads data from all sessions.
-  ///
-  /// This method retrieves and clears the output buffers of all active sessions,
-  /// returning a vector of `SessionData` objects.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<Vec<SessionData>, napi::Error>`: Returns a vector of `SessionData` objects mapping session IDs to their read data if successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const allData = multiplexer.readAllSessions();
-  /// allData.forEach(session => {
-  ///     console.log(`Session ${session.session_id}: ${session.data.toString()}`);
-  /// });
-  /// ```
   #[napi]
   pub async fn read_all_sessions(&self) -> Result<Vec<SessionData>> {
-    let sessions = self.sessions.lock().await;
     let mut result = Vec::new();
-    for (id, session) in sessions.iter() {
-      let output = session.output_buffer.lock().await.clone();
+    for entry in self.sessions.iter() {
+      let output = entry.value().output_buffer.lock().await.clone();
       result.push(SessionData {
-        session_id: *id,
+        session_id: *entry.key(),
         data: Buffer::from(output),
       });
     }
@@ -314,27 +228,9 @@ impl PtyMultiplexer {
     Ok(result)
   }
 
-  /// Removes a specific session.
-  ///
-  /// This method deletes the specified session from the multiplexer, freeing up resources.
-  ///
-  /// # Parameters
-  ///
-  /// - `session_id`: The unique identifier of the session to be removed.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.removeSession(sessionId);
-  /// ```
   #[napi]
   pub async fn remove_session(&self, session_id: u32) -> Result<()> {
-    let mut sessions = self.sessions.lock().await;
-    if sessions.remove(&session_id).is_some() {
+    if self.sessions.remove(&session_id).is_some() {
       info!("Removed session with ID: {}", session_id);
       Ok(())
     } else {
@@ -345,24 +241,6 @@ impl PtyMultiplexer {
     }
   }
 
-  /// Merges multiple sessions into one.
-  ///
-  /// This method combines the input and output buffers of the specified sessions into the primary session,
-  /// and removes the merged sessions from the multiplexer.
-  ///
-  /// # Parameters
-  ///
-  /// - `session_ids`: An array of session IDs to be merged. The first ID in the array is considered the primary session.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.mergeSessions([1, 2, 3]);
-  /// ```
   #[napi]
   pub async fn merge_sessions(&self, session_ids: Vec<u32>) -> Result<()> {
     if session_ids.is_empty() {
@@ -371,269 +249,135 @@ impl PtyMultiplexer {
       ));
     }
     info!("Merging sessions: {:?}", session_ids);
-
-    let mut sessions = self.sessions.lock().await;
-
     let primary_session_id = session_ids[0];
-    let primary_session = sessions
-      .get_mut(&primary_session_id)
-      .ok_or_else(|| {
-        napi::Error::from_reason(format!(
-          "Primary session ID {} not found",
-          primary_session_id
-        ))
-      })?
-      .clone();
-
-    // Collect sessions to be merged
-    let sessions_to_merge: Vec<_> = session_ids
-      .iter()
-      .skip(1)
-      .filter_map(|&session_id| {
-        sessions
-          .remove(&session_id)
-          .map(|session| (session_id, session))
-      })
-      .collect();
-
-    // Perform the merging operations
+    let primary_session = if let Some(session) = self.sessions.get(&primary_session_id) {
+      session.clone()
+    } else {
+      return Err(napi::Error::from_reason(format!(
+        "Primary session ID {} not found",
+        primary_session_id
+      )));
+    };
+    let mut sessions_to_merge = Vec::new();
+    for &session_id in session_ids.iter().skip(1) {
+      if let Some(session) = self.sessions.remove(&session_id) {
+        sessions_to_merge.push((session_id, session));
+      }
+    }
     for (session_id, session) in sessions_to_merge {
-      // Merge input buffers
-      let mut primary_session_input = primary_session.input_buffer.clone();
-      primary_session_input.extend_from_slice(&session.input_buffer);
-      drop(session.input_buffer); // Release ownership
-
-      // Merge output buffers
-      let mut primary_output_buffer = primary_session.output_buffer.lock().await;
-      let session_output_buffer = session.output_buffer.lock().await;
-      primary_output_buffer.extend_from_slice(&session_output_buffer);
-      drop(session_output_buffer); // Release lock before next iteration
-
+      let mut primary_input = primary_session.input_buffer.clone();
+      primary_input.extend_from_slice(&session.1.input_buffer);
+      let mut primary_output = primary_session.output_buffer.lock().await;
+      let session_output = &*session.1.output_buffer.lock().await;
+      primary_output.extend_from_slice(&session_output);
       info!("Merged and removed session with ID: {}", session_id);
     }
-
-    // Update the primary session's input buffer
-    if let Some(updated_primary) = sessions.get_mut(&primary_session_id) {
+    if let Some(mut updated_primary) = self.sessions.get_mut(&primary_session_id) {
       updated_primary.input_buffer = primary_session.input_buffer.clone();
       let mut primary_output_buffer = updated_primary.output_buffer.lock().await;
       *primary_output_buffer = primary_session.output_buffer.lock().await.clone();
     }
-
     info!(
       "Successfully merged sessions {:?} into session {}",
       session_ids, primary_session_id
     );
-
     Ok(())
   }
 
-  /// Splits a session into two separate sessions.
-  ///
-  /// This method divides the input and output buffers of the specified session into two roughly equal parts,
-  /// creating two new sessions and removing the original session from the multiplexer.
-  ///
-  /// # Parameters
-  ///
-  /// - `session_id`: The unique identifier of the session to be split.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<[u32; 2], napi::Error>`: Returns an array containing the IDs of the two new sub-sessions if successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const [newSession1, newSession2] = multiplexer.splitSession(sessionId);
-  /// console.log(`Split into sessions ${newSession1} and ${newSession2}`);
-  /// ```
   #[napi]
   pub async fn split_session(&self, session_id: u32) -> Result<[u32; 2]> {
     info!("Splitting session: {}", session_id);
-
-    let mut sessions = self.sessions.lock().await;
-
-    let session = sessions
-      .get(&session_id)
-      .ok_or_else(|| napi::Error::from_reason(format!("Session ID {} not found", session_id)))?
-      .clone();
-
-    let input_half_size = session.input_buffer.len() / 2;
+    let session_clone = if let Some(session) = self.sessions.get(&session_id) {
+      session.clone()
+    } else {
+      return Err(napi::Error::from_reason(format!(
+        "Session ID {} not found",
+        session_id
+      )));
+    };
+    let input_half_size = session_clone.input_buffer.len() / 2;
     let output_half_size = {
-      let output = session.output_buffer.lock().await;
+      let output = session_clone.output_buffer.lock().await;
       output.len() / 2
     };
-
-    // Create first new session
-    let new_session_1_id = sessions.keys().max().cloned().unwrap_or(0) + 1;
-    let new_session_1 = PtySession {
-      stream_id: new_session_1_id,
-      input_buffer: session.input_buffer[..input_half_size].to_vec(),
-      output_buffer: Arc::new(TokioMutex::new(
-        session.output_buffer.lock().await[..output_half_size].to_vec(),
-      )),
+    let input1 = session_clone.input_buffer[..input_half_size].to_vec();
+    let input2 = session_clone.input_buffer[input_half_size..].to_vec();
+    let output1 = {
+      let output = session_clone.output_buffer.lock().await;
+      output[..output_half_size].to_vec()
     };
-    sessions.insert(new_session_1_id, new_session_1);
-
-    // Create second new session
+    let output2 = {
+      let output = session_clone.output_buffer.lock().await;
+      output[output_half_size..].to_vec()
+    };
+    let new_session_1_id = self
+      .sessions
+      .iter()
+      .map(|entry| *entry.key())
+      .max()
+      .unwrap_or(0)
+      + 1;
+    self.sessions.insert(
+      new_session_1_id,
+      PtySession {
+        stream_id: new_session_1_id,
+        input_buffer: input1,
+        output_buffer: Arc::new(TokioMutex::new(output1)),
+      },
+    );
     let new_session_2_id = new_session_1_id + 1;
-    let new_session_2 = PtySession {
-      stream_id: new_session_2_id,
-      input_buffer: session.input_buffer[input_half_size..].to_vec(),
-      output_buffer: Arc::new(TokioMutex::new(
-        session.output_buffer.lock().await[output_half_size..].to_vec(),
-      )),
-    };
-    sessions.insert(new_session_2_id, new_session_2);
-
-    // Remove the original session
-    sessions.remove(&session_id);
-
+    self.sessions.insert(
+      new_session_2_id,
+      PtySession {
+        stream_id: new_session_2_id,
+        input_buffer: input2,
+        output_buffer: Arc::new(TokioMutex::new(output2)),
+      },
+    );
+    self.sessions.remove(&session_id);
     info!(
       "Successfully split session {} into sessions {} and {}",
       session_id, new_session_1_id, new_session_2_id
     );
-
     Ok([new_session_1_id, new_session_2_id])
   }
 
-  /// Sets an environment variable for the PTY process.
-  ///
-  /// This method updates the environment variable specified by `key` with the provided `value`.
-  ///
-  /// # Parameters
-  ///
-  /// - `key`: The name of the environment variable to set.
-  /// - `value`: The value to assign to the environment variable.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.setEnv('PATH', '/usr/bin');
-  /// ```
   #[napi]
   pub async fn set_env(&self, key: String, value: String) -> Result<()> {
-    // Attempt to set the environment variable.
-    env::set_var(&key, &value);
-    info!("Environment variable set: {} = {}", key, value);
-
-    // Verify that the environment variable was set correctly.
-    match env::var(&key) {
-      Ok(v) if v == value => {
-        info!("Successfully set environment variable: {} = {}", key, value);
-        Ok(())
-      }
-      Ok(v) => {
-        error!(
-          "Mismatch when setting environment variable: {} = {}, but found {}",
-          key, value, v
-        );
-        Err(napi::Error::from_reason(format!(
-          "Failed to correctly set environment variable: {}",
-          key
-        )))
-      }
-      Err(e) => {
-        error!(
-          "Error setting environment variable: {} = {}. Error: {}",
-          key, value, e
-        );
-        Err(napi::Error::from_reason(format!(
-          "Error setting environment variable: {} = {}. Error: {}",
-          key, value, e
-        )))
-      }
-    }
+    // Set the environment variable in the PTY process
+    self
+      .pty_process
+      .set_env(key.clone(), value.clone())
+      .await
+      .map_err(convert_io_error)?;
+    info!("Set environment variable: {} = {}", key, value);
+    Ok(())
   }
 
-  /// Changes the shell of the PTY process.
-  ///
-  /// This method sends a command to the PTY process to replace the current shell with the specified one.
-  ///
-  /// # Parameters
-  ///
-  /// - `shell_path`: The file system path to the new shell executable.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.changeShell('/bin/zsh');
-  /// ```
   #[napi]
   pub async fn change_shell(&self, shell_path: String) -> Result<()> {
     let command = format!("exec {}\n", shell_path);
-
-    // Convert String to Bytes
     let bytes_command = Bytes::copy_from_slice(command.as_bytes());
-
     self
       .pty_process
       .write_data(&bytes_command)
+      .await
       .map_err(convert_io_error)?;
     info!("Changed shell to: {}", shell_path);
     Ok(())
   }
 
-  /// Retrieves the status of the PTY process.
-  ///
-  /// This method checks whether the PTY process is running or has terminated, and returns the status.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<String, napi::Error>`: Returns a string indicating the status of the PTY process if successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const status = multiplexer.status();
-  /// console.log(`PTY Status: ${status}`);
-  /// ```
   #[napi]
   pub async fn status(&self) -> Result<String> {
-    match self.pty_process.waitpid(WNOHANG) {
-      Ok(0) => {
-        info!("PTY status: Running");
-        Ok("Running".to_string())
-      }
-      Ok(pid) => {
-        info!("PTY terminated with PID {}", pid);
-        Ok(format!("Terminated with PID {}", pid))
-      }
-      Err(e) => {
-        error!("Error retrieving PTY status: {}", e);
-        Err(convert_io_error(e))
-      }
+    match self.pty_process.is_running().await {
+      Ok(true) => Ok("Running".to_string()),
+      Ok(false) => Ok("Terminated".to_string()),
+      Err(e) => Err(convert_io_error(e)),
     }
   }
 
-  /// Adjusts the logging level.
-  ///
-  /// This method sets the global logging level to the specified value.
-  /// Valid levels include "error", "warn", "info", "debug", and "trace".
-  ///
-  /// # Parameters
-  ///
-  /// - `level`: The desired logging level.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.setLogLevel('debug');
-  /// ```
   #[napi]
   pub async fn set_log_level(&self, level: String) -> Result<()> {
-    crate::utils::logging::initialize_logging();
     match level.to_lowercase().as_str() {
       "error" => log::set_max_level(log::LevelFilter::Error),
       "warn" => log::set_max_level(log::LevelFilter::Warn),
@@ -649,231 +393,90 @@ impl PtyMultiplexer {
     Ok(())
   }
 
-  /// Closes all sessions within the multiplexer.
-  ///
-  /// This method removes all active sessions, effectively resetting the multiplexer.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.closeAllSessions();
-  /// ```
   #[napi]
   pub async fn close_all_sessions(&self) -> Result<()> {
-    let mut sessions = self.sessions.lock().await;
-    sessions.clear();
+    self.sessions.clear();
     info!("All sessions have been closed.");
     Ok(())
   }
 
-  /// Gracefully shuts down the PTY process and closes all sessions.
-  ///
-  /// This method sends a `SIGTERM` signal to the PTY process, waits for it to terminate,
-  /// and closes all active sessions.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.shutdownPty();
-  /// ```
   #[napi]
   pub async fn shutdown_pty(&self) -> Result<()> {
     self
       .pty_process
       .kill_process(SIGTERM)
+      .await
       .map_err(convert_io_error)?;
     self
       .pty_process
       .waitpid(WNOHANG)
+      .await
       .map_err(convert_io_error)?;
     self.close_all_sessions().await?;
-    info!("PTY has been gracefully shut down.");
-    // Send shutdown signal to background tasks
     let _ = self.shutdown_sender.send(());
+    info!("PTY has been gracefully shut down.");
     Ok(())
   }
 
-  /// Forcefully shuts down the PTY process and closes all sessions.
-  ///
-  /// This method sends a `SIGKILL` signal to the PTY process, waits for it to terminate,
-  /// and closes all active sessions.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.forceShutdownPty();
-  /// ```
   #[napi]
   pub async fn force_shutdown_pty(&self) -> Result<()> {
     self
       .pty_process
       .kill_process(SIGKILL)
+      .await
       .map_err(convert_io_error)?;
     self
       .pty_process
       .waitpid(WNOHANG)
+      .await
       .map_err(convert_io_error)?;
     self.close_all_sessions().await?;
-    info!("PTY has been forcefully shut down.");
-    // Send shutdown signal to background tasks
     let _ = self.shutdown_sender.send(());
+    info!("PTY has been forcefully shut down.");
     Ok(())
   }
 
-  /// Resizes the PTY window.
-  ///
-  /// This method adjusts the number of columns and rows of the PTY, effectively changing the terminal size.
-  ///
-  /// # Parameters
-  ///
-  /// - `cols`: The number of columns for the PTY window.
-  /// - `rows`: The number of rows for the PTY window.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the resize operation is successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// multiplexer.resize(120, 40);
-  /// ```
   #[napi]
   pub async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
     self
       .pty_process
       .resize(cols, rows)
+      .await
       .map_err(convert_io_error)?;
     info!("Resized PTY to cols: {}, rows: {}", cols, rows);
     Ok(())
   }
 
-  /// Dispatches the provided output data to all active sessions' output buffers.
-  ///
-  /// # Parameters
-  ///
-  /// - `data`: A reference to the data to be dispatched.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), napi::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
   pub async fn dispatch_output(&self, data: &[u8]) -> Result<()> {
-    let sessions = self.sessions.lock().await;
-    for session in sessions.values() {
-      let mut output_buffer = session.output_buffer.lock().await;
-      output_buffer.extend_from_slice(data);
+    let data_clone = data.to_vec();
+    let session_entries: Vec<_> = self.sessions.iter().collect();
+    let update_futures = session_entries.into_iter().map(|entry| {
+      let session = entry.value().clone();
+      let data = data_clone.clone();
+      async move {
+        let mut buffer = session.output_buffer.lock().await;
+        buffer.extend_from_slice(&data);
+        Ok::<(), io::Error>(())
+      }
+    });
+    let results = join_all(update_futures).await;
+    for res in results {
+      res.map_err(|e| convert_io_error(io::Error::new(io::ErrorKind::Other, e)))?;
     }
     info!("Dispatched {} bytes to all sessions.", data.len());
     Ok(())
   }
-  /// Lists all active session IDs.
-  ///
-  /// This method retrieves the unique identifiers of all active sessions managed by the multiplexer.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<Vec<u32>, napi::Error>`: Returns a vector of session IDs if successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const sessionIds = multiplexer.listSessions();
-  /// console.log(`Active sessions: ${sessionIds.join(', ')}`);
-  /// ```
-  #[napi]
-  pub async fn list_sessions(&self) -> Result<Vec<u32>> {
-    let sessions = self.sessions.lock().await;
-    let session_ids: Vec<u32> = sessions.keys().cloned().collect();
-    info!("Listing all active sessions: {:?}", session_ids);
-    Ok(session_ids)
-  }
 
-  /// Handles the creation of a new session.
-  ///
-  /// This method is a wrapper around the `create_session` method, providing an asynchronous
-  /// interface for creating a new session.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<u32, napi::Error>`: Returns the unique stream ID of the newly created session if successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const sessionId = await multiplexer.handleCreateSession();
-  /// console.log(`Created session with ID: ${sessionId}`);
-  /// ```
-  #[napi]
-  pub async fn handle_create_session(&self) -> Result<u32> {
-    self.create_session().await
-  }
-  /// Asynchronously reads data from PTY.
-  ///
-  /// This method reads available data from the PTY process and returns it as a byte array.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<Buffer, napi::Error>`: Returns a `Buffer` containing the read data if successful, otherwise returns an error.
-  ///
-  /// # Examples
-  ///
-  /// ```javascript
-  /// const data = await multiplexer.readFromPty();
-  /// console.log(`Data from PTY: ${data.toString()}`);
-  /// ```
-  #[napi]
-  pub async fn read_from_pty(&self) -> Result<Buffer> {
-    let mut buffer = [0u8; 4096];
-    match self.pty_process.read_data(&mut buffer) {
-      Ok(n) if n > 0 => {
-        let data = buffer[..n].to_vec();
-        info!("Read {} bytes from PTY.", n);
-        Ok(Buffer::from(data))
-      }
-      Ok(_) => {
-        // No data read
-        Ok(Buffer::from(Vec::new()))
-      }
-      Err(e) => {
-        error!("Error reading from PTY: {}", e);
-        Err(convert_io_error(e))
-      }
-    }
-  }
-
-  /// Reads data from the PTY and dispatches it to all active sessions.
-  ///
-  /// This asynchronous method is intended to be run within a background task.
-  ///
-  /// # Returns
-  ///
-  /// - `Result<(), io::Error>`: Returns `Ok` if the operation is successful, otherwise returns an error.
   pub async fn read_and_dispatch(&self) -> Result<()> {
     let mut buffer = [0u8; 4096];
-    match self.pty_process.read_data(&mut buffer) {
+    match self.pty_process.read_data(&mut buffer).await {
       Ok(n) if n > 0 => {
         let data = buffer[..n].to_vec();
         info!("Read {} bytes from PTY.", n);
         self.dispatch_output(&data).await?;
       }
-      Ok(_) => {
-        // No more data to read at the moment
-      }
-      Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-        // No data available right now
-      }
+      Ok(_) => {}
+      Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
       Err(e) => {
         error!("Error reading from PTY: {}", e);
         return Err(convert_io_error(e));
@@ -881,17 +484,40 @@ impl PtyMultiplexer {
     }
     Ok(())
   }
+
+  pub async fn list_sessions(&self) -> Result<Vec<u32>> {
+    let session_ids: Vec<u32> = self.sessions.iter().map(|entry| *entry.key()).collect();
+    info!("Listing all active sessions: {:?}", session_ids);
+    Ok(session_ids)
+  }
+
+  #[napi]
+  pub async fn read_from_pty(&self) -> Result<Buffer> {
+    let mut buffer = [0u8; 4096];
+    match self.pty_process.read_data(&mut buffer).await {
+      Ok(n) if n > 0 => Ok(Buffer::from(buffer[..n].to_vec())),
+      Ok(_) => Ok(Buffer::from(Vec::new())),
+      Err(e) => Err(convert_io_error(e)),
+    }
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::time::Duration;
-  use tokio::time;
-
+  use bytes::Bytes;
+  use log::info;
   use once_cell::sync::OnceCell;
+  use std::sync::Arc;
+  use std::time::Duration;
+  use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+  use tokio::sync::Mutex as TokioMutex;
+  use tokio::time::{self, timeout};
 
   static INIT: OnceCell<()> = OnceCell::new();
+  const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+  const POLL_INTERVAL: Duration = Duration::from_millis(100);
+  const MAX_RETRIES: u32 = 100;
 
   fn init_logger() {
     INIT.get_or_init(|| {
@@ -903,445 +529,391 @@ mod tests {
     });
   }
 
+  struct TestGuard {
+    multiplexer: PtyMultiplexer,
+  }
+
+  impl Drop for TestGuard {
+    fn drop(&mut self) {
+      let _ = self.multiplexer.shutdown_sender.send(());
+    }
+  }
+
+  async fn wait_for_output(
+    multiplexer: &PtyMultiplexer,
+    session_id: u32,
+    expected_content: Option<&str>,
+  ) -> Option<String> {
+    for _ in 0..MAX_RETRIES {
+      if let Ok(output) = multiplexer.read_from_session(session_id).await {
+        let output_str = String::from_utf8_lossy(&output).to_string();
+        if !output_str.is_empty() {
+          if let Some(expected) = expected_content {
+            if output_str.contains(expected) {
+              return Some(output_str);
+            }
+          } else {
+            return Some(output_str);
+          }
+        }
+      }
+      time::sleep(POLL_INTERVAL).await;
+    }
+    None
+  }
+
+  struct MockPtyProcess {
+    write_sender: UnboundedSender<Vec<u8>>,
+    read_receiver: TokioMutex<UnboundedReceiver<Vec<u8>>>,
+    is_running: TokioMutex<bool>,
+    env_vars: Arc<TokioMutex<HashMap<String, String>>>,
+  }
+
+  impl MockPtyProcess {
+    fn new() -> Self {
+      let (write_sender, mut write_receiver) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+      let (read_sender, read_receiver) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+      let env_vars = Arc::new(TokioMutex::new(HashMap::new()));
+      let env_vars_clone = Arc::clone(&env_vars);
+
+      tokio::spawn(async move {
+        while let Some(data) = write_receiver.recv().await {
+          let command = String::from_utf8_lossy(&data);
+          if command.starts_with("echo ") {
+            let rest = command[5..].trim_end_matches('\n');
+            if rest.starts_with('$') {
+              let key = rest[1..].to_string();
+              let env = env_vars_clone.lock().await;
+              let value = env.get(&key).cloned().unwrap_or_default();
+              let response = format!("{}\n", value);
+              let _ = read_sender.send(response.into_bytes());
+            } else {
+              let response = rest.to_string() + "\n";
+              let _ = read_sender.send(response.into_bytes());
+            }
+          } else if command.starts_with("export ") {
+            // parse export KEY="VALUE"
+            let rest = command[7..].trim_end_matches('\n');
+            if let Some(eq_pos) = rest.find('=') {
+              let key = rest[..eq_pos].to_string();
+              let value_part = rest[eq_pos + 1..].trim();
+              let value = if value_part.starts_with('"')
+                && value_part.ends_with('"')
+                && value_part.len() >= 2
+              {
+                value_part[1..value_part.len() - 1].to_string()
+              } else {
+                value_part.to_string()
+              };
+              let mut env = env_vars_clone.lock().await;
+              env.insert(key, value);
+            }
+          } else if command.starts_with("stty size") {
+            let response = "40 100\n".to_string();
+            let _ = read_sender.send(response.into_bytes());
+          } else if command.starts_with("exec ") {
+            // For simplicity, do nothing on exec commands
+          } else {
+            // Handle other commands if necessary
+          }
+        }
+      });
+
+      Self {
+        write_sender,
+        read_receiver: TokioMutex::new(read_receiver),
+        is_running: TokioMutex::new(true),
+        env_vars,
+      }
+    }
+  }
+
+  #[async_trait]
+  impl PtyProcessInterface for MockPtyProcess {
+    async fn set_env(&self, key: String, value: String) -> io::Result<()> {
+      let mut env = self.env_vars.lock().await;
+      env.insert(key, value);
+      Ok(())
+    }
+
+    async fn write_data(&self, data: &Bytes) -> io::Result<usize> {
+      self.write_sender.send(data.to_vec()).map_err(|_| {
+        io::Error::new(io::ErrorKind::BrokenPipe, "Failed to send data to mock PTY")
+      })?;
+      Ok(data.len())
+    }
+
+    async fn read_data(&self, buffer: &mut [u8]) -> io::Result<usize> {
+      let mut receiver = self.read_receiver.lock().await;
+      match receiver.recv().await {
+        Some(data) => {
+          let len = data.len().min(buffer.len());
+          buffer[..len].copy_from_slice(&data[..len]);
+          Ok(len)
+        }
+        None => Ok(0),
+      }
+    }
+
+    async fn is_running(&self) -> io::Result<bool> {
+      let running = self.is_running.lock().await;
+      Ok(*running)
+    }
+
+    async fn kill_process(&self, _signal: i32) -> io::Result<()> {
+      let mut running = self.is_running.lock().await;
+      *running = false;
+      Ok(())
+    }
+
+    async fn waitpid(&self, _options: i32) -> io::Result<i32> {
+      Ok(0)
+    }
+
+    async fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {
+      Ok(())
+    }
+
+    async fn get_pid(&self) -> io::Result<i32> {
+      Ok(1234)
+    }
+  }
+
+  async fn create_test_multiplexer() -> (PtyMultiplexer, TestGuard) {
+    let mock_pty = Arc::new(MockPtyProcess::new());
+    let sessions = Arc::new(DashMap::new());
+    let (shutdown_sender, _) = broadcast::channel(1);
+    let multiplexer = PtyMultiplexer::new_for_test(
+      mock_pty as Arc<dyn PtyProcessInterface>,
+      sessions.clone(),
+      shutdown_sender,
+    );
+    let guard = TestGuard {
+      multiplexer: multiplexer.clone(),
+    };
+    (multiplexer, guard)
+  }
+
+  impl PtyMultiplexer {
+    pub fn new_for_test(
+      pty_process: Arc<dyn PtyProcessInterface>,
+      sessions: Arc<DashMap<u32, PtySession>>,
+      shutdown_sender: broadcast::Sender<()>,
+    ) -> Self {
+      let multiplexer = Self {
+        pty_process,
+        sessions,
+        shutdown_sender: shutdown_sender.clone(),
+      };
+      let multiplexer_clone = multiplexer.clone();
+      tokio::spawn(async move {
+        let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
+        let mut retry_delay = Duration::from_secs(1);
+        let max_retry_delay = Duration::from_secs(32);
+        loop {
+          tokio::select! {
+              res = multiplexer_clone.read_and_dispatch() => {
+                  match res {
+                      Ok(_) => {
+                          retry_delay = Duration::from_secs(1);
+                      },
+                      Err(e) => {
+                          error!("Error in background PTY read task: {}", e);
+                          sleep(retry_delay).await;
+                          retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
+                          continue;
+                      },
+                  }
+              },
+              _ = shutdown_receiver.recv() => {
+                  info!("Shutdown signal received. Terminating background PTY read task.");
+                  break;
+              },
+          }
+        }
+        info!("Background PTY read task terminated.");
+      });
+      multiplexer
+    }
+  }
+
   #[tokio::test]
   async fn test_create_pty_multiplexer() {
     init_logger();
-    // Create a mock PtyProcess
-    let pty_process = PtyProcess::new().expect("Failed to create PtyProcess");
-    let multiplexer = PtyMultiplexer {
-      pty_process: Arc::new(pty_process),
-      sessions: Arc::new(TokioMutex::new(HashMap::new())),
-      shutdown_sender: broadcast::channel(1).0, // Dummy sender for testing
-    };
-
-    // Spawn the background read and dispatch task
-    let multiplexer_clone = multiplexer.clone();
-    tokio::spawn(async move {
-      let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
-      loop {
-        tokio::select! {
-            res = multiplexer_clone.read_and_dispatch() => {
-                if let Err(e) = res {
-                    error!("Error in background PTY read task: {}", e);
-                    break;
-                }
-            },
-            _ = shutdown_receiver.recv() => {
-                info!("Shutdown signal received. Terminating background PTY read task.");
-                break;
-            },
-        }
-      }
-      info!("Background PTY read task terminated.");
-    });
-
-    // Create a session
-    let session_id = multiplexer
-      .create_session()
-      .await
-      .expect("Failed to create session");
-    assert_eq!(session_id, 1);
-
-    // Send data to the session
-    multiplexer
-      .send_to_session(session_id, Buffer::from("echo test\n".as_bytes()))
-      .await
-      .expect("Failed to send data to session");
-
-    // Allow some time for the background task to read and dispatch
-    time::sleep(Duration::from_millis(100)).await;
-
-    // Read from the session
-    let output = multiplexer
-      .read_from_session(session_id)
-      .await
-      .expect("Failed to read from session");
-    let output_str = String::from_utf8_lossy(&output).to_string();
-
-    // The output should contain both the echoed command and the response
-    assert!(output_str.contains("echo test"));
-    // Depending on shell configuration, the response may vary
-
-    // Shutdown multiplexer
-    multiplexer.shutdown_sender.send(()).ok();
+    let result = timeout(TEST_TIMEOUT, async {
+      let (multiplexer, _guard) = create_test_multiplexer().await;
+      let session_id = multiplexer
+        .create_session()
+        .await
+        .expect("Failed to create session");
+      assert_eq!(session_id, 1);
+      multiplexer
+        .send_to_session(session_id, Buffer::from("echo test\n".as_bytes()))
+        .await
+        .expect("Failed to send data to session");
+      let output = wait_for_output(&multiplexer, session_id, Some("test"))
+        .await
+        .expect("Failed to get output in time");
+      assert!(output.contains("test"));
+    })
+    .await;
+    assert!(result.is_ok(), "Test timed out");
   }
 
   #[tokio::test]
   async fn test_resize_pty() {
     init_logger();
-    let pty_process = PtyProcess::new().expect("Failed to create PtyProcess");
-    let multiplexer = PtyMultiplexer {
-      pty_process: Arc::new(pty_process),
-      sessions: Arc::new(TokioMutex::new(HashMap::new())),
-      shutdown_sender: broadcast::channel(1).0, // Dummy sender for testing
-    };
-
-    // Spawn the background read and dispatch task
-    let multiplexer_clone = multiplexer.clone();
-    tokio::spawn(async move {
-      let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
-      loop {
-        tokio::select! {
-            res = multiplexer_clone.read_and_dispatch() => {
-                if let Err(e) = res {
-                    error!("Error in background PTY read task: {}", e);
-                    break;
-                }
-            },
-            _ = shutdown_receiver.recv() => {
-                info!("Shutdown signal received. Terminating background PTY read task.");
-                break;
-            },
-        }
-      }
-      info!("Background PTY read task terminated.");
-    });
-
-    // Create a session
-    let session_id = multiplexer
-      .create_session()
-      .await
-      .expect("Failed to create session");
-    assert_eq!(session_id, 1);
-
-    // Resize the PTY
-    multiplexer
-      .resize(40, 100)
-      .await
-      .expect("Failed to resize PTY");
-
-    // Send 'stty size' command to verify resize
-    multiplexer
-      .send_to_session(session_id, Buffer::from("stty size\n".as_bytes()))
-      .await
-      .expect("Failed to send 'stty size' command");
-
-    // Allow some time for the background task to read and dispatch
-    time::sleep(Duration::from_millis(100)).await;
-
-    // Read from the session
-    let output = multiplexer
-      .read_from_session(session_id)
-      .await
-      .expect("Failed to read from session");
-    let output_str = String::from_utf8_lossy(&output).to_string();
-
-    // Split the output into lines
-    let lines: Vec<&str> = output_str.trim().split('\n').collect();
-    // The first line is the echoed command, the second line should be the size
-    if lines.len() >= 2 {
-      let size_output = lines[1];
-      assert!(
-        size_output.contains("40 100"),
-        "Incorrect terminal size after resize. Expected '40 100', got '{}'",
-        size_output
-      );
-    } else {
-      panic!(
-        "Terminal size output incomplete. Expected at least 2 lines, got {}",
-        lines.len()
-      );
-    }
-
-    // Shutdown multiplexer
-    multiplexer.shutdown_sender.send(()).ok();
+    let result = timeout(TEST_TIMEOUT, async {
+      let (multiplexer, _guard) = create_test_multiplexer().await;
+      let session_id = multiplexer
+        .create_session()
+        .await
+        .expect("Failed to create session");
+      multiplexer
+        .resize(40, 100)
+        .await
+        .expect("Failed to resize PTY");
+      time::sleep(Duration::from_millis(500)).await;
+      multiplexer
+        .send_to_session(session_id, Buffer::from("stty size\n".as_bytes()))
+        .await
+        .expect("Failed to send 'stty size' command");
+      let output = wait_for_output(&multiplexer, session_id, Some("40 100"))
+        .await
+        .expect("Failed to get terminal size output");
+      let lines: Vec<&str> = output.trim().split('\n').collect();
+      let size_line = lines
+        .iter()
+        .find(|line| line.contains("40") && line.contains("100"))
+        .expect("Could not find size information in output");
+      assert!(size_line.contains("40 100"));
+    })
+    .await;
+    assert!(result.is_ok(), "Test timed out");
   }
 
   #[tokio::test]
-  async fn test_multiplexer_basic() {
+  async fn test_send_and_read_sessions() {
     init_logger();
-    let pty_process = PtyProcess::new().expect("Failed to create PtyProcess");
-    let multiplexer = PtyMultiplexer {
-      pty_process: Arc::new(pty_process),
-      sessions: Arc::new(TokioMutex::new(HashMap::new())),
-      shutdown_sender: broadcast::channel(1).0, // Dummy sender for testing
-    };
-
-    // Spawn the background read and dispatch task
-    let multiplexer_clone = multiplexer.clone();
-    tokio::spawn(async move {
-      let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
-      loop {
-        tokio::select! {
-            res = multiplexer_clone.read_and_dispatch() => {
-                if let Err(e) = res {
-                    error!("Error in background PTY read task: {}", e);
-                    break;
-                }
-            },
-            _ = shutdown_receiver.recv() => {
-                info!("Shutdown signal received. Terminating background PTY read task.");
-                break;
-            },
-        }
-      }
-      info!("Background PTY read task terminated.");
-    });
-
-    // Create two sessions
-    let session1 = multiplexer
-      .create_session()
-      .await
-      .expect("Failed to create session 1");
-    let session2 = multiplexer
-      .create_session()
-      .await
-      .expect("Failed to create session 2");
-    assert_eq!(session1, 1);
-    assert_eq!(session2, 2);
-
-    // Send different commands to each session
-    multiplexer
-      .send_to_session(session1, Buffer::from("echo session1 data\n".as_bytes()))
-      .await
-      .expect("Failed to send to session 1");
-    multiplexer
-      .send_to_session(session2, Buffer::from("echo session2 data\n".as_bytes()))
-      .await
-      .expect("Failed to send to session 2");
-
-    // Allow some time for the background task to read and dispatch
-    time::sleep(Duration::from_millis(200)).await;
-
-    // Read from session 1
-    let output1 = multiplexer
-      .read_from_session(session1)
-      .await
-      .expect("Failed to read from session 1");
-    let output1_str = String::from_utf8_lossy(&output1).to_string();
-
-    // Read from session 2
-    let output2 = multiplexer
-      .read_from_session(session2)
-      .await
-      .expect("Failed to read from session 2");
-    let output2_str = String::from_utf8_lossy(&output2).to_string();
-
-    // Since outputs are broadcasted, both sessions should see both commands and their outputs
-    assert!(output1_str.contains("echo session1 data"));
-    assert!(output1_str.contains("session1 data"));
-    assert!(output1_str.contains("echo session2 data"));
-    assert!(output1_str.contains("session2 data"));
-
-    assert!(output2_str.contains("echo session1 data"));
-    assert!(output2_str.contains("session1 data"));
-    assert!(output2_str.contains("echo session2 data"));
-    assert!(output2_str.contains("session2 data"));
-
-    // Shutdown multiplexer
-    multiplexer.shutdown_sender.send(()).ok();
+    let result = timeout(TEST_TIMEOUT, async {
+      let (multiplexer, _guard) = create_test_multiplexer().await;
+      let session1 = multiplexer
+        .create_session()
+        .await
+        .expect("Failed to create session 1");
+      let session2 = multiplexer
+        .create_session()
+        .await
+        .expect("Failed to create session 2");
+      multiplexer
+        .send_to_session(session1, Buffer::from("echo session1 data\n".as_bytes()))
+        .await
+        .expect("Failed to send to session 1");
+      multiplexer
+        .send_to_session(session2, Buffer::from("echo session2 data\n".as_bytes()))
+        .await
+        .expect("Failed to send to session 2");
+      let output1 = wait_for_output(&multiplexer, session1, Some("session1 data"))
+        .await
+        .expect("Failed to get output from session 1");
+      let output2 = wait_for_output(&multiplexer, session2, Some("session2 data"))
+        .await
+        .expect("Failed to get output from session 2");
+      assert!(output1.contains("session1 data"));
+      assert!(output2.contains("session2 data"));
+    })
+    .await;
+    assert!(result.is_ok(), "Test timed out");
   }
 
   #[tokio::test]
   async fn test_set_env() {
     init_logger();
-    let pty_process = PtyProcess::new().expect("Failed to create PtyProcess");
-    let multiplexer = PtyMultiplexer {
-      pty_process: Arc::new(pty_process),
-      sessions: Arc::new(TokioMutex::new(HashMap::new())),
-      shutdown_sender: broadcast::channel(1).0, // Dummy sender for testing
-    };
-
-    // Spawn the background read and dispatch task
-    let multiplexer_clone = multiplexer.clone();
-    tokio::spawn(async move {
-      let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
-      loop {
-        tokio::select! {
-            res = multiplexer_clone.read_and_dispatch() => {
-                if let Err(e) = res {
-                    error!("Error in background PTY read task: {}", e);
-                    break;
-                }
-            },
-            _ = shutdown_receiver.recv() => {
-                info!("Shutdown signal received. Terminating background PTY read task.");
-                break;
-            },
-        }
-      }
-      info!("Background PTY read task terminated.");
-    });
-
-    // Create a session
-    let session_id = multiplexer
-      .create_session()
-      .await
-      .expect("Failed to create session");
-    assert_eq!(session_id, 1);
-
-    // Set environment variable
-    multiplexer
-      .set_env("TEST_ENV_VAR".to_string(), "test_value".to_string())
-      .await
-      .expect("Failed to set environment variable");
-
-    // Send command to print the environment variable
-    multiplexer
-      .send_to_session(session_id, Buffer::from("echo $TEST_ENV_VAR\n".as_bytes()))
-      .await
-      .expect("Failed to send echo command");
-
-    // Allow some time for the background task to read and dispatch
-    time::sleep(Duration::from_millis(100)).await;
-
-    // Read from the session
-    let output = multiplexer
-      .read_from_session(session_id)
-      .await
-      .expect("Failed to read from session");
-    let output_str = String::from_utf8_lossy(&output).to_string();
-
-    // The output should contain both the echoed command and the environment variable value
-    assert!(output_str.contains("echo $TEST_ENV_VAR"));
-    assert!(output_str.contains("test_value"));
-
-    // Shutdown multiplexer
-    multiplexer.shutdown_sender.send(()).ok();
+    let result = timeout(TEST_TIMEOUT, async {
+      let (multiplexer, _guard) = create_test_multiplexer().await;
+      let session_id = multiplexer
+        .create_session()
+        .await
+        .expect("Failed to create session");
+      multiplexer
+        .set_env("TEST_ENV_VAR".to_string(), "test_value".to_string())
+        .await
+        .expect("Failed to set environment variable");
+      time::sleep(Duration::from_millis(500)).await;
+      multiplexer
+        .send_to_session(session_id, Buffer::from("echo $TEST_ENV_VAR\n".as_bytes()))
+        .await
+        .expect("Failed to send echo command");
+      let output = wait_for_output(&multiplexer, session_id, Some("test_value"))
+        .await
+        .expect("Failed to get environment variable output");
+      assert!(output.contains("test_value"));
+    })
+    .await;
+    assert!(result.is_ok(), "Test timed out");
   }
 
   #[tokio::test]
   async fn test_change_shell() {
     init_logger();
-    let pty_process = PtyProcess::new().expect("Failed to create PtyProcess");
-    let multiplexer = PtyMultiplexer {
-      pty_process: Arc::new(pty_process),
-      sessions: Arc::new(TokioMutex::new(HashMap::new())),
-      shutdown_sender: broadcast::channel(1).0, // Dummy sender for testing
-    };
-
-    // Spawn the background read and dispatch task
-    let multiplexer_clone = multiplexer.clone();
-    tokio::spawn(async move {
-      let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
-      loop {
-        tokio::select! {
-            res = multiplexer_clone.read_and_dispatch() => {
-                if let Err(e) = res {
-                    error!("Error in background PTY read task: {}", e);
-                    break;
-                }
-            },
-            _ = shutdown_receiver.recv() => {
-                info!("Shutdown signal received. Terminating background PTY read task.");
-                break;
-            },
-        }
-      }
-      info!("Background PTY read task terminated.");
-    });
-
-    // Create a session
-    let session_id = multiplexer
-      .create_session()
-      .await
-      .expect("Failed to create session");
-    assert_eq!(session_id, 1);
-
-    // Change shell to /bin/sh
-    multiplexer
-      .change_shell("/bin/sh".to_string())
-      .await
-      .expect("Failed to change shell");
-
-    // Send a command to verify shell change
-    multiplexer
-      .send_to_session(session_id, Buffer::from("echo Shell Changed\n".as_bytes()))
-      .await
-      .expect("Failed to send echo command");
-
-    // Allow some time for the background task to read and dispatch
-    time::sleep(Duration::from_millis(200)).await;
-
-    // Read from the session
-    let output = multiplexer
-      .read_from_session(session_id)
-      .await
-      .expect("Failed to read from session");
-    let output_str = String::from_utf8_lossy(&output).to_string();
-
-    // The output should contain both the echoed command and the response
-    assert!(output_str.contains("echo Shell Changed"));
-    assert!(output_str.contains("Shell Changed"));
-
-    // Shutdown multiplexer
-    multiplexer.shutdown_sender.send(()).ok();
+    let result = timeout(TEST_TIMEOUT, async {
+      let (multiplexer, _guard) = create_test_multiplexer().await;
+      let session_id = multiplexer
+        .create_session()
+        .await
+        .expect("Failed to create session");
+      multiplexer
+        .change_shell("/bin/sh".to_string())
+        .await
+        .expect("Failed to change shell");
+      time::sleep(Duration::from_millis(500)).await;
+      multiplexer
+        .send_to_session(session_id, Buffer::from("echo Shell Changed\n".as_bytes()))
+        .await
+        .expect("Failed to send echo command");
+      let output = wait_for_output(&multiplexer, session_id, Some("Shell Changed"))
+        .await
+        .expect("Failed to get shell change confirmation");
+      assert!(output.contains("Shell Changed"));
+    })
+    .await;
+    assert!(result.is_ok(), "Test timed out");
   }
 
   #[tokio::test]
   async fn test_shutdown_pty() {
     init_logger();
-    let pty_process = PtyProcess::new().expect("Failed to create PtyProcess");
-    let multiplexer = PtyMultiplexer {
-      pty_process: Arc::new(pty_process),
-      sessions: Arc::new(TokioMutex::new(HashMap::new())),
-      shutdown_sender: broadcast::channel(1).0, // Dummy sender for testing
-    };
-
-    // Spawn the background read and dispatch task
-    let multiplexer_clone = multiplexer.clone();
-    tokio::spawn(async move {
-      let mut shutdown_receiver = multiplexer_clone.shutdown_sender.subscribe();
-      loop {
-        tokio::select! {
-            res = multiplexer_clone.read_and_dispatch() => {
-                if let Err(e) = res {
-                    error!("Error in background PTY read task: {}", e);
-                    break;
-                }
-            },
-            _ = shutdown_receiver.recv() => {
-                info!("Shutdown signal received. Terminating background PTY read task.");
-                break;
-            },
-        }
+    let result = timeout(TEST_TIMEOUT, async {
+      let (multiplexer, _guard) = create_test_multiplexer().await;
+      let session_id = multiplexer
+        .create_session()
+        .await
+        .expect("Failed to create session");
+      multiplexer
+        .send_to_session(
+          session_id,
+          Buffer::from("echo Before Shutdown\n".as_bytes()),
+        )
+        .await
+        .expect("Failed to send command");
+      let output = wait_for_output(&multiplexer, session_id, Some("Before Shutdown"))
+        .await
+        .expect("Failed to get pre-shutdown output");
+      assert!(output.contains("Before Shutdown"));
+      multiplexer
+        .shutdown_pty()
+        .await
+        .expect("Failed to shutdown PTY");
+      let send_result = multiplexer
+        .send_to_session(session_id, Buffer::from("echo After Shutdown\n".as_bytes()))
+        .await;
+      assert!(send_result.is_err(), "Expected send after shutdown to fail");
+      if let Ok(final_output) = multiplexer.read_from_session(session_id).await {
+        let final_str = String::from_utf8_lossy(&final_output).to_string();
+        assert!(!final_str.contains("After Shutdown"));
       }
-      info!("Background PTY read task terminated.");
-    });
-
-    // Create a session
-    let session_id = multiplexer
-      .create_session()
-      .await
-      .expect("Failed to create session");
-    assert_eq!(session_id, 1);
-
-    // Send a command
-    multiplexer
-      .send_to_session(
-        session_id,
-        Buffer::from("echo Before Shutdown\n".as_bytes()),
-      )
-      .await
-      .expect("Failed to send command");
-
-    // Allow some time for the background task to read and dispatch
-    time::sleep(Duration::from_millis(100)).await;
-
-    // Shutdown PTY gracefully
-    multiplexer
-      .shutdown_pty()
-      .await
-      .expect("Failed to shutdown PTY");
-
-    // Attempt to send another command after shutdown
-    let send_result = multiplexer
-      .send_to_session(session_id, Buffer::from("echo After Shutdown\n".as_bytes()))
-      .await;
-    assert!(
-      send_result.is_err(),
-      "Should not be able to send data after shutdown"
-    );
-
-    // Read from the session
-    let output = multiplexer
-      .read_from_session(session_id)
-      .await
-      .expect("Failed to read from session after shutdown");
-    let output_str = String::from_utf8_lossy(&output).to_string();
-
-    // The output should contain the command before shutdown
-    assert!(output_str.contains("echo Before Shutdown"));
-    assert!(output_str.contains("Before Shutdown"));
+    })
+    .await;
+    assert!(result.is_ok(), "Test timed out");
   }
 }

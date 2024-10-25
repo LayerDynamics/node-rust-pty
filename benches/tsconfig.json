@@ -1,9 +1,10 @@
+// node-rust-pty/benches/tsconfig.json
 {
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"moduleResolution": "NodeNext",
 		"module": "NodeNext",
-		"outDir": "lib"
+		"outDir": "."
 	},
 	"include": [
 		"."

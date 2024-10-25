@@ -1,6 +1,6 @@
 // src/pty/pty_renderer.rs
 
-use crate::pty::emulator::PtyOutputHandler;
+use crate::pty::PtyOutputHandler;
 use crate::virtual_dom::diff::diff;
 use crate::virtual_dom::renderer::Renderer;
 use crate::virtual_dom::VNode;
@@ -62,23 +62,23 @@ impl PtyRenderer {
   /// ```
   #[napi]
   pub fn render(&mut self, data: Buffer) -> Result<()> {
-    // Convert data to a UTF-8 string, handling potential invalid bytes gracefully.
+    // Convert data to UTF-8 string
     let content = String::from_utf8_lossy(data.as_ref()).to_string();
 
-    // Create a new virtual DOM node representing the PTY output.
+    // Create the new virtual DOM node
     let mut props = HashMap::new();
     props.insert("content".to_string(), content.clone());
+
     let new_vdom = VNode::element("text".to_string(), props, HashMap::new(), vec![]);
 
+    // Lock the renderer and apply changes
     let renderer = self.renderer.lock().unwrap();
 
-    // Diff the new VDOM against the previous state to determine necessary patches.
+    // Compute and apply patches
     let patches = diff(&self.prev_vdom, &new_vdom);
-
-    // Apply the computed patches to the renderer.
     renderer.apply_patches(&patches)?;
 
-    // Update the previous VDOM state.
+    // Update previous state
     self.prev_vdom = new_vdom;
 
     Ok(())
@@ -208,7 +208,7 @@ impl PtyOutputHandler for PtyRenderer {
     let new_vdom = VNode::element("text".to_string(), props, HashMap::new(), vec![]);
 
     // Lock the renderer to apply changes.
-    let mut renderer = self.renderer.lock().unwrap();
+    let renderer = self.renderer.lock().unwrap();
 
     // Diff the new VDOM against the previous state to determine necessary patches.
     let patches = diff(&self.prev_vdom, &new_vdom);
@@ -223,156 +223,133 @@ impl PtyOutputHandler for PtyRenderer {
   }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::virtual_dom::VNode;
-//     use std::sync::Arc;
-//     use std::sync::Mutex;
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::virtual_dom::{VElement as VirtualVElement, VNode as VirtualVNode};
+  use std::sync::Arc;
 
-//     /// Test that `PtyRenderer` correctly processes and renders PTY output.
-//     #[test]
-//     fn test_pty_renderer_render() {
-//         // Initialize the renderer with a root node.
-//         let renderer = Arc::new(Mutex::new(Renderer::new(VNode::element(
-//             "root".to_string(),
-//             HashMap::new(),
-//             HashMap::new(),
-//             vec![],
-//         ))));
+  // Helper function to create a test VNode with the same structure as what the renderer creates
+  fn create_test_node(content: &str) -> VirtualVNode {
+    let mut props = HashMap::new();
+    props.insert("content".to_string(), content.to_string());
+    VirtualVNode::Element(VirtualVElement {
+      tag: "text".to_string(),
+      props,
+      styles: HashMap::new(),
+      children: vec![],
+    })
+  }
 
-//         // Create the output handler wrapper.
-//         let mut pty_renderer = PtyRenderer {
-//             renderer: Arc::clone(&renderer),
-//             prev_vdom: VNode::element("root".to_string(), HashMap::new(), HashMap::new(), vec![]),
-//         };
+  // Helper function to create root node
+  fn create_root_node() -> VirtualVNode {
+    VirtualVNode::Element(VirtualVElement {
+      tag: "root".to_string(),
+      props: HashMap::new(),
+      styles: HashMap::new(),
+      children: vec![],
+    })
+  }
 
-//         // Simulate PTY output.
-//         let data = Buffer::from("Hello, PTY!".as_bytes());
-//         pty_renderer.render(data).unwrap();
+  // Helper function to compare VNodes with debug output
+  fn nodes_are_equal(renderer: &Renderer, expected: &VirtualVNode) -> bool {
+    let current_state = renderer
+      .get_current_state()
+      .expect("Failed to get current state");
 
-//         // Verify the final state.
-//         let renderer_guard = renderer.lock().unwrap();
-//         assert_eq!(
-//             *renderer_guard.root.lock().unwrap(),
-//             VNode::element(
-//                 "text".to_string(),
-//                 {
-//                     let mut props = HashMap::new();
-//                     props.insert("content".to_string(), "Hello, PTY!".to_string());
-//                     props
-//                 },
-//                 HashMap::new(),
-//                 vec![],
-//             )
-//         );
-//     }
+    if current_state != *expected {
+      println!("Node comparison failed!");
+      println!("Expected: {:?}", expected);
+      println!("Got: {:?}", current_state);
+      false
+    } else {
+      true
+    }
+  }
 
-//     /// Test that `PtyRenderer` applies patches correctly via the `render` method.
-//     #[test]
-//     fn test_pty_renderer_apply_patches() {
-//         let renderer = Arc::new(Mutex::new(Renderer::new(VNode::element(
-//             "root".to_string(),
-//             HashMap::new(),
-//             HashMap::new(),
-//             vec![],
-//         ))));
+  /// Test that `PtyRenderer` correctly processes and renders PTY output.
+  #[test]
+  fn test_pty_renderer_render() {
+    // Initialize the renderer with proper root node
+    let mut pty_renderer = PtyRenderer::new();
 
-//         let mut pty_renderer = PtyRenderer {
-//             renderer: Arc::clone(&renderer),
-//             prev_vdom: VNode::element("root".to_string(), HashMap::new(), HashMap::new(), vec![]),
-//         };
+    // Simulate PTY output
+    let data = Buffer::from("Hello, PTY!".as_bytes());
+    pty_renderer.render(data).unwrap();
 
-//         // Simulate PTY output.
-//         let data1 = Buffer::from("Hello, ".as_bytes());
-//         pty_renderer.render(data1).unwrap();
+    // Get renderer lock
+    let renderer = pty_renderer.renderer.lock().unwrap();
 
-//         // Simulate more PTY output.
-//         let data2 = Buffer::from("PTY!".as_bytes());
-//         pty_renderer.render(data2).unwrap();
+    // The expected node structure matches what the renderer creates
+    let expected_node = create_test_node("Hello, PTY!");
 
-//         // Verify the final state.
-//         let renderer_guard = renderer.lock().unwrap();
-//         assert_eq!(
-//             *renderer_guard.root.lock().unwrap(),
-//             VNode::element(
-//                 "text".to_string(),
-//                 {
-//                     let mut props = HashMap::new();
-//                     props.insert("content".to_string(), "PTY!".to_string());
-//                     props
-//                 },
-//                 HashMap::new(),
-//                 vec![],
-//             )
-//         );
-//     }
+    assert!(
+      nodes_are_equal(&renderer, &expected_node),
+      "Node structures don't match after render"
+    );
+  }
 
-//     /// Test that `PtyRenderer` handles empty data gracefully.
-//     #[test]
-//     fn test_pty_renderer_handle_empty_data() {
-//         let renderer = Arc::new(Mutex::new(Renderer::new(VNode::element(
-//             "root".to_string(),
-//             HashMap::new(),
-//             HashMap::new(),
-//             vec![],
-//         ))));
+  /// Test that `PtyRenderer` applies patches correctly
+  #[test]
+  fn test_pty_renderer_apply_patches() {
+    let mut pty_renderer = PtyRenderer::new();
 
-//         let mut pty_renderer = PtyRenderer {
-//             renderer: Arc::clone(&renderer),
-//             prev_vdom: VNode::element("root".to_string(), HashMap::new(), HashMap::new(), vec![]),
-//         };
+    // First update
+    let data1 = Buffer::from("Hello, ".as_bytes());
+    pty_renderer.render(data1).unwrap();
 
-//         // Simulate empty PTY output.
-//         let empty_data = Buffer::from("".as_bytes());
-//         pty_renderer.render(empty_data).unwrap();
+    // Second update
+    let data2 = Buffer::from("PTY!".as_bytes());
+    pty_renderer.render(data2).unwrap();
 
-//         // Verify that the VDOM remains unchanged.
-//         let renderer_guard = renderer.lock().unwrap();
-//         assert_eq!(*renderer_guard.root.lock().unwrap(), VNode::element(
-//             "root".to_string(),
-//             HashMap::new(),
-//             HashMap::new(),
-//             vec![],
-//         ));
-//     }
+    // Verify final state
+    let renderer = pty_renderer.renderer.lock().unwrap();
+    let expected_node = create_test_node("PTY!");
 
-//     /// Test that `PtyRenderer` processes multiple outputs correctly.
-//     #[test]
-//     fn test_pty_renderer_multiple_outputs() {
-//         let renderer = Arc::new(Mutex::new(Renderer::new(VNode::element(
-//             "root".to_string(),
-//             HashMap::new(),
-//             HashMap::new(),
-//             vec![],
-//         ))));
+    assert!(
+      nodes_are_equal(&renderer, &expected_node),
+      "Node structures don't match after patches"
+    );
+  }
 
-//         let mut pty_renderer = PtyRenderer {
-//             renderer: Arc::clone(&renderer),
-//             prev_vdom: VNode::element("root".to_string(), HashMap::new(), HashMap::new(), vec![]),
-//         };
+  /// Test that `PtyRenderer` handles empty data gracefully
+  #[test]
+  fn test_pty_renderer_handle_empty_data() {
+    let mut pty_renderer = PtyRenderer::new();
 
-//         // Simulate multiple PTY outputs.
-//         let data1 = Buffer::from("Hello, ".as_bytes());
-//         pty_renderer.render(data1).unwrap();
+    // Simulate empty PTY output
+    let empty_data = Buffer::from("".as_bytes());
+    pty_renderer.render(empty_data).unwrap();
 
-//         let data2 = Buffer::from("World!".as_bytes());
-//         pty_renderer.render(data2).unwrap();
+    // Verify state
+    let renderer = pty_renderer.renderer.lock().unwrap();
+    let expected_node = create_test_node("");
 
-//         // Verify the final state.
-//         let renderer_guard = renderer.lock().unwrap();
-//         assert_eq!(
-//             *renderer_guard.root.lock().unwrap(),
-//             VNode::element(
-//                 "text".to_string(),
-//                 {
-//                     let mut props = HashMap::new();
-//                     props.insert("content".to_string(), "World!".to_string());
-//                     props
-//                 },
-//                 HashMap::new(),
-//                 vec![],
-//             )
-//         );
-//     }
-// }
+    assert!(
+      nodes_are_equal(&renderer, &expected_node),
+      "Node structures don't match for empty input"
+    );
+  }
+
+  /// Test that `PtyRenderer` processes multiple outputs correctly
+  #[test]
+  fn test_pty_renderer_multiple_outputs() {
+    let mut pty_renderer = PtyRenderer::new();
+
+    // Simulate multiple PTY outputs
+    let data1 = Buffer::from("Hello, ".as_bytes());
+    pty_renderer.render(data1).unwrap();
+
+    let data2 = Buffer::from("World!".as_bytes());
+    pty_renderer.render(data2).unwrap();
+
+    // Verify final state
+    let renderer = pty_renderer.renderer.lock().unwrap();
+    let expected_node = create_test_node("World!");
+
+    assert!(
+      nodes_are_equal(&renderer, &expected_node),
+      "Node structures don't match after multiple outputs"
+    );
+  }
+}

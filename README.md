@@ -1,269 +1,523 @@
 # node-rust-pty
 
-A high-performance, cross-platform PTY (pseudoterminal) implementation for Node.js, built with Rust and N-API.
+A high-performance Node.js native module providing comprehensive PTY (pseudo-terminal) functionality with virtual DOM-based rendering and advanced session management, implemented in Rust with N-API bindings.
 
-## Table of Contents
+## Core Features & Implementation Details
 
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-- [API Reference](#api-reference)
-- [Platform Support](#platform-support)
-- [Building from Source](#building-from-source)
-- [Testing](#testing)
-- [Benchmarks](#benchmarks)
-- [Contributing](#contributing)
-- [License](#license)
+### PTY Process Management
 
-## Features
+#### Process Creation and Lifecycle
+```typescript
+// Process initialization
+const pty = await PtyHandle.new({
+  env: process.env,           // Environment variables
+  cwd: process.cwd(),        // Working directory
+  defaultShell: true         // Use system default shell
+});
 
-- Cross-platform support (macOS and Linux)
-- High-performance Rust implementation
-- Node.js bindings using N-API
-- PTY multiplexing for managing multiple sessions
-- Asynchronous I/O operations
-- Configurable logging levels
-- Environment variable management
-- Shell changing capability
-- Graceful shutdown and force kill options
+// Status monitoring
+const status = await pty.status();
+// Returns: "Running" | "Not Running" | "Unknown"
 
-## Installation
-
-To install node-rust-pty, run the following command in your project directory:
-
-```bash
-npm install node-rust-pty
+// Graceful shutdown with timeout
+await pty.close({timeout: 5000}); 
 ```
 
-This package includes prebuilt binaries for supported platforms. If a prebuilt binary is not available for your platform, it will attempt to build from source during installation.
+#### Platform-Specific Implementations
+- **Linux**
+  - Uses `/dev/pts` for PTY allocation
+  - Full `termios` settings support
+  - Process group handling
+  ```rust
+  // Linux PTY creation (internal)
+  let master_fd = unsafe { posix_openpt(O_RDWR | O_NOCTTY) };
+  unsafe { grantpt(master_fd) };
+  unsafe { unlockpt(master_fd) };
+  ```
 
-## Usage
+- **macOS**
+  - Native PTY through BSD API
+  - Terminal attribute management
+  - Process group signals
+  ```rust
+  // macOS PTY handling (internal)
+  let mut master: libc::c_int = 0;
+  let mut slave: libc::c_int = 0;
+  let ret = unsafe { openpty(&mut master, &mut slave, ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
+  ```
 
-Here's a basic example of how to use node-rust-pty:
+- **Windows**
+  - Basic process spawning
+  - Environment handling
+  - Working directory support
 
-```javascript
-const { PtyHandle } = require('node-rust-pty');
+### Virtual DOM Terminal Engine
 
-async function main() {
-  const pty = PtyHandle.new();
-  const multiplexer = pty.multiplexerHandle;
+#### Core Virtual DOM Types
+```typescript
+interface VNode {
+  type: 'text' | 'element';
+  content: string | VElement;
+}
 
-  // Create a new session
-  const sessionId = await multiplexer.createSession();
+interface VElement {
+  tag: string;
+  props: {
+    content?: string;
+    id?: string;
+    class?: string;
+    [key: string]: string | undefined;
+  };
+  styles: {
+    color?: 'black' | 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan' | 'white';
+    background?: string;
+    bold?: 'true' | 'false';
+    underline?: 'true' | 'false';
+    italic?: 'true' | 'false';
+    strikethrough?: 'true' | 'false';
+    [key: string]: string | undefined;
+  };
+  children: VNode[];
+}
+```
 
-  // Write to the session
-  await multiplexer.sendToSession(sessionId, Buffer.from('echo "Hello, PTY!"\n').toJSON().data);
+#### Diff Engine Implementation
+```typescript
+// Available patch types
+type Patch = 
+  | { type: 'Replace'; node: VNode }
+  | { type: 'UpdateProps'; props: Record<string, string> }
+  | { type: 'AppendChild'; node: VNode }
+  | { type: 'RemoveChild'; index: number }
+  | { type: 'UpdateText'; text: string }
+  | { type: 'None' };
 
-  // Read from the session
-  const output = await multiplexer.readFromSession(sessionId);
-  console.log(output);
+// Usage example
+const oldNode = createTextNode("Hello");
+const newNode = createTextNode("Hello World");
+const patches = diff(oldNode, newNode);
+// Results in: [{ type: 'UpdateText', text: 'Hello World' }]
+```
 
-  // Close the PTY
+#### Renderer Capabilities
+```typescript
+// Text styling example
+const styledOutput = {
+  type: 'element',
+  content: {
+    tag: 'text',
+    props: { content: 'Styled Output' },
+    styles: {
+      color: 'blue',
+      background: 'white',
+      bold: 'true',
+      underline: 'true'
+    },
+    children: []
+  }
+};
+
+// Render update
+await pty.render(styledOutput);
+```
+
+### Session Management System
+
+#### Session Creation and Control
+```typescript
+// Create multiple sessions
+const session1 = await pty.createSession();
+const session2 = await pty.createSession();
+
+// Session operations
+interface SessionOperations {
+  // Send data to specific session
+  sendToSession(
+    sessionId: number, 
+    data: Buffer, 
+    options?: {
+      flush?: boolean,      // Flush buffer immediately
+      encoding?: string,    // Buffer encoding
+      timeout?: number      // Operation timeout
+    }
+  ): Promise<void>;
+
+  // Read from session with options
+  readFromSession(
+    sessionId: number,
+    options?: {
+      maxBytes?: number,    // Maximum bytes to read
+      timeout?: number,     // Read timeout
+      encoding?: string     // Output encoding
+    }
+  ): Promise<string>;
+
+  // Merge sessions
+  mergeSessions(
+    sessionIds: number[],
+    options?: {
+      primary?: number     // Primary session ID
+    }
+  ): Promise<void>;
+
+  // Split session
+  splitSession(
+    sessionId: number
+  ): Promise<[number, number]>;
+}
+```
+
+#### Session Buffer Management
+```typescript
+// Internal buffer management (Rust)
+pub struct SessionBuffer {
+    input_buffer: Vec<u8>,
+    output_buffer: Arc<Mutex<Vec<u8>>>,
+    max_buffer_size: usize,
+    encoding: String,
+}
+
+// Buffer operations
+impl SessionBuffer {
+    pub fn write(&mut self, data: &[u8]) -> io::Result<usize>;
+    pub fn read(&mut self, max_bytes: Option<usize>) -> io::Result<Vec<u8>>;
+    pub fn flush(&mut self) -> io::Result<()>;
+    pub fn clear(&mut self);
+}
+```
+
+### Text Processing Engine
+
+#### ASCII/ANSI Parser
+```typescript
+// Supported ANSI sequences
+const ANSISupport = {
+  cursor: {
+    up: '\x1b[{n}A',
+    down: '\x1b[{n}B',
+    forward: '\x1b[{n}C',
+    backward: '\x1b[{n}D',
+    nextLine: '\x1b[{n}E',
+    prevLine: '\x1b[{n}F',
+    setPosition: '\x1b[{line};{column}H'
+  },
+  clear: {
+    screen: '\x1b[2J',
+    line: '\x1b[2K',
+    toEnd: '\x1b[0J',
+    toStart: '\x1b[1J'
+  },
+  style: {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    italic: '\x1b[3m',
+    underline: '\x1b[4m',
+    reverse: '\x1b[7m'
+  },
+  color: {
+    // Foreground colors
+    black: '\x1b[30m',
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m',
+    white: '\x1b[37m',
+    // Background colors
+    bgBlack: '\x1b[40m',
+    bgRed: '\x1b[41m',
+    bgGreen: '\x1b[42m',
+    bgYellow: '\x1b[43m',
+    bgBlue: '\x1b[44m',
+    bgMagenta: '\x1b[45m',
+    bgCyan: '\x1b[46m',
+    bgWhite: '\x1b[47m'
+  }
+};
+```
+
+#### Input Event Handling
+```typescript
+// Available input events
+interface InputEvent {
+  type: 'keypress' | 'keydown' | 'keyup';
+  key: string;
+  modifiers: {
+    ctrl: boolean;
+    alt: boolean;
+    shift: boolean;
+    meta: boolean;
+  };
+  raw: number[];  // Raw byte sequence
+}
+
+// Event handling example
+pty.on('input', (event: InputEvent) => {
+  if (event.type === 'keypress' && event.modifiers.ctrl && event.key === 'c') {
+    // Handle Ctrl+C
+  }
+});
+```
+
+## Installation & Setup
+
+### Prerequisites
+```bash
+# Linux build dependencies
+sudo apt-get install -y \
+  build-essential \
+  pkg-config \
+  libssl-dev
+
+# macOS build dependencies
+xcode-select --install
+
+# Windows build dependencies
+# Ensure you have Visual Studio Build Tools with Windows SDK
+```
+
+### Installation
+```bash
+# NPM installation
+npm install node-rust-pty
+
+# Yarn installation
+yarn add node-rust-pty
+
+# Build from source
+git clone https://github.com/yourusername/node-rust-pty.git
+cd node-rust-pty
+npm install
+npm run build
+```
+
+## Usage Examples
+
+### Basic Terminal Session
+```typescript
+import { PtyHandle } from 'node-rust-pty';
+
+async function basicTerminal() {
+  const pty = await PtyHandle.new();
+  const session = await pty.createSession();
+
+  // Execute command
+  await pty.sendToSession(session, Buffer.from('ls -la\n'));
+  
+  // Read with timeout
+  const output = await pty.readFromSession(session, {
+    timeout: 1000,
+    maxBytes: 4096
+  });
+  
+  console.log('Command output:', output);
+  await pty.removeSession(session);
   await pty.close();
 }
-
-main().catch(console.error);
 ```
 
-## API Reference
-
-### PtyHandle
-
-The `PtyHandle` class represents the main PTY interface.
-
-#### Static Methods
-
-- `static new(): PtyHandle` - Creates a new PtyHandle instance.
-
-#### Instance Methods
-
-- `read(): Promise<string>` - Reads data from the PTY.
-- `write(data: string): Promise<void>` - Writes data to the PTY.
-- `resize(cols: number, rows: number): Promise<void>` - Resizes the PTY window.
-- `execute(command: string): Promise<string>` - Executes a command in the PTY.
-- `close(): Promise<void>` - Closes the PTY gracefully.
-- `forceKill(forceTimeoutMs: number): Promise<void>` - Forcefully kills the PTY process.
-- `pid(): Promise<number>` - Retrieves the process ID of the PTY.
-- `killProcess(signal: number): Promise<void>` - Sends a signal to the PTY process.
-- `waitpid(options: number): Promise<number>` - Waits for the PTY process to change state.
-- `closeMasterFd(): Promise<void>` - Closes the master file descriptor of the PTY.
-- `setEnv(key: string, value: string): Promise<void>` - Sets an environment variable for the PTY process.
-
-#### Properties
-
-- `multiplexerHandle: MultiplexerHandle` - Provides access to the MultiplexerHandle for managing PTY sessions.
-
-### MultiplexerHandle
-
-The `MultiplexerHandle` class manages multiple PTY sessions.
-
-#### Static Methods
-
-- `static new(): MultiplexerHandle` - Creates a new MultiplexerHandle instance.
-
-#### Instance Methods
-
-- `createSession(): Promise<number>` - Creates a new PTY session and returns its ID.
-- `sendToSession(sessionId: number, data: Array<number>): Promise<void>` - Sends data to a specific session.
-- `sendToPty(data: Uint8Array): Promise<void>` - Sends data directly to the PTY.
-- `broadcast(data: Uint8Array): Promise<void>` - Broadcasts data to all active sessions.
-- `readFromSession(sessionId: number): Promise<string>` - Reads data from a specific session.
-- `readAllSessions(): Promise<Array<SessionData>>` - Reads data from all active sessions.
-- `removeSession(sessionId: number): Promise<void>` - Removes a specific session.
-- `mergeSessions(sessionIds: Array<number>): Promise<void>` - Merges multiple sessions into one.
-- `splitSession(sessionId: number): Promise<SplitSessionResult>` - Splits a session into two separate sessions.
-- `setEnv(key: string, value: string): Promise<void>` - Sets an environment variable for the PTY process.
-- `changeShell(shellPath: string): Promise<void>` - Changes the shell of the PTY process.
-- `status(): Promise<string>` - Retrieves the current status of the PTY process.
-- `setLogLevel(level: string): Promise<void>` - Sets the logging level for the PTY process.
-- `closeAllSessions(): Promise<void>` - Closes all active sessions.
-- `shutdownPty(): Promise<void>` - Gracefully shuts down the PTY process and closes all sessions.
-
-### Interfaces
-
-#### SplitSessionResult
-
+### Styled Terminal Output
 ```typescript
-interface SplitSessionResult {
-  session1: number;
-  session2: number;
+import { PtyHandle, VNode } from 'node-rust-pty';
+
+async function styledOutput() {
+  const pty = await PtyHandle.new();
+  const session = await pty.createSession();
+
+  // Create styled header
+  const header: VNode = {
+    type: 'element',
+    content: {
+      tag: 'text',
+      props: {
+        content: '=== Terminal Output ===\n',
+        id: 'header'
+      },
+      styles: {
+        color: 'blue',
+        bold: 'true',
+        underline: 'true'
+      },
+      children: []
+    }
+  };
+
+  // Create content node
+  const content: VNode = {
+    type: 'element',
+    content: {
+      tag: 'text',
+      props: {
+        content: 'Command output below:\n',
+        class: 'output'
+      },
+      styles: {
+        color: 'green'
+      },
+      children: []
+    }
+  };
+
+  // Render both nodes
+  await pty.render(header);
+  await pty.render(content);
+  
+  // Execute command with styled output
+  await pty.sendToSession(session, Buffer.from('echo "Hello World"\n'));
+  
+  await pty.close();
 }
 ```
 
-#### SessionData
-
+### Multiple Session Management
 ```typescript
-interface SessionData {
-  sessionId: number;
-  data: string;
+import { PtyHandle } from 'node-rust-pty';
+
+async function multiSession() {
+  const pty = await PtyHandle.new();
+  
+  // Create multiple sessions
+  const sessions = await Promise.all([
+    pty.createSession(),
+    pty.createSession(),
+    pty.createSession()
+  ]);
+  
+  // Send different commands to each session
+  await Promise.all([
+    pty.sendToSession(sessions[0], Buffer.from('echo "Session 1"\n')),
+    pty.sendToSession(sessions[1], Buffer.from('echo "Session 2"\n')),
+    pty.sendToSession(sessions[2], Buffer.from('echo "Session 3"\n'))
+  ]);
+  
+  // Read from all sessions
+  const outputs = await Promise.all(
+    sessions.map(sid => pty.readFromSession(sid))
+  );
+  
+  // Merge first two sessions
+  await pty.mergeSessions([sessions[0], sessions[1]]);
+  
+  // Split remaining session
+  const [newSession1, newSession2] = await pty.splitSession(sessions[2]);
+  
+  // Cleanup
+  await pty.closeAllSessions();
+  await pty.close();
 }
 ```
 
-### PtyMultiplexer
+## Configuration
 
-The `PtyMultiplexer` class is an alternative implementation of the multiplexer functionality.
-
-#### Constructor
-
-- `constructor(ptyProcess: object)`
-
-#### Methods
-
-- `createSession(): number`
-- `sendToSession(sessionId: number, data: Buffer): void`
-- `broadcast(data: Buffer): void`
-- `readFromSession(sessionId: number): Buffer`
-- `readAllSessions(): Array<SessionData>`
-- `removeSession(sessionId: number): void`
-- `mergeSessions(sessionIds: Array<number>): void`
-- `splitSession(sessionId: number): number[]`
-- `setEnv(key: string, value: string): void`
-- `changeShell(shellPath: string): void`
-- `status(): string`
-- `setLogLevel(level: string): void`
-- `closeAllSessions(): void`
-- `shutdownPty(): void`
-- `forceShutdownPty(): void`
-- `distributeOutput(): Promise<void>`
-- `readFromPty(): Promise<Buffer>`
-- `dispatchOutput(output: Buffer): Promise<void>`
-
-Note: The `PtyMultiplexer` class provides similar functionality to `MultiplexerHandle` but with some differences in method signatures and return types.
-
-## Platform Support
-
-node-rust-pty currently supports the following platforms:
-
-- macOS (x64, arm64)
-- Linux (x64)
-
-Support for Windows is planned for future releases.
-
-## Building from Source
-
-To build node-rust-pty from source, you'll need:
-
-- Rust (latest stable version)
-- Node.js (v10 or later)
-- Python (for node-gyp)
-- A C++ compiler (gcc, clang, or MSVC)
-
-Follow these steps:
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/layerdynamics/node-rust-pty.git
-   cd node-rust-pty
-   ```
-
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Build the project:
-   ```bash
-   npm run build
-   ```
-
-## Testing
-
-To run the test suite:
-
-```bash
-npm test
+### TypeScript Configuration
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": [
+    "index.ts",
+    "index.d.ts",
+    "npm/prebuilds/*.d.ts"
+  ]
+}
 ```
 
-This will run both JavaScript and Rust tests. The test suite uses AVA for JavaScript tests and the built-in Rust test framework.
-
-## Benchmarks
-
-Benchmarks are available to measure the performance of key operations. To run the benchmarks:
-
-```bash
-npm run bench
+### Build Configuration
+```json
+{
+  "napi": {
+    "name": "node-rust-pty",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ]
+    }
+  }
+}
 ```
 
-## Contributing
+## Development Commands
+```bash
+# Build commands
+npm run build              # Build everything
+npm run build:ts          # Build TypeScript only
+npm run build:debug       # Debug build
+npm run clean            # Clean build artifacts
 
-Contributions to node-rust-pty are welcome! Please follow these steps:
+# Testing
+npm test                 # Run all tests
+npm test -- --watch     # Watch mode
 
-1. Fork the repository
-2. Create a new branch for your feature or bug fix
-3. Write tests for your changes
-4. Implement your changes
-5. Run the test suite and ensure all tests pass
-6. Submit a pull request with a clear description of your changes
+# Publishing
+npm run prepublishOnly  # Prepare for publishing
+```
 
-Please adhere to the existing code style and add appropriate documentation for new features.
+## Current Limitations
+
+1. PTY Process Limitations:
+   - Windows support lacks full ConPTY integration
+   - Limited process group signal handling on Windows
+   - No job control support
+
+2. Terminal Emulation:
+   - Subset of VT100/VT220 sequences supported
+   - Limited mouse input support
+   - Basic color palette (8 colors + backgrounds)
+
+3. Session Management:
+   - In-memory session storage only
+   - No persistent sessions
+   - Limited session sharing capabilities
+
+4. Performance Considerations:
+   - Large output buffers may impact memory usage
+   - Virtual DOM updates may be CPU intensive
+   - No hardware acceleration
 
 ## License
 
-This is free and unencumbered software released into the public domain.
+MIT License - see [LICENSE](LICENSE) for details.
 
-Anyone is free to copy, modify, publish, use, compile, sell, or
-distribute this software, either in source code form or as a compiled
-binary, for any purpose, commercial or non-commercial, and by any
-means.
+## Support & Documentation
 
-In jurisdictions that recognize copyright laws, the author or authors
-of this software dedicate any and all copyright interest in the
-software to the public domain. We make this dedication for the benefit
-of the public at large and to the detriment of our heirs and
-successors. We intend this dedication to be an overt act of
-relinquishment in perpetuity of all present and future rights to this
-software under copyright law.
+- Issue Tracker: GitHub Issues
+- API Documentation: See `docs/` directory
+- Examples: See `examples/` directory
+- Technical Documentation: See `docs/technical/`
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
-OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
-ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-OTHER DEALINGS IN THE SOFTWARE.
+## Contributing
 
-For more information, please refer to <http://unlicense.org/>
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed contribution guidelines.
 
----
+Key areas for contribution:
+1. Windows ConPTY integration
+2. Additional terminal sequences
+3. Performance optimizations
+4. Testing improvements
 
-Created and maintained by [@layerdynamics](https://github.com/layerdynamics)
+## Credits
+
+Built with:
+- [Rust](https://www.rust-lang.org/)
+- [N-API](https://nodejs.org/api/n-api.html)
+- [Tokio](https://tokio.rs/)
+- [TypeScript](https://www.typescriptlang.org/)
+
+## Version History
+
+See [CHANGELOG.md](CHANGELOG.md) for detailed version history.

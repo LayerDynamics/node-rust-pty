@@ -2,17 +2,28 @@
 
 use bytes::Bytes;
 use libc::{
-  _exit, close, dup2, execl, execle, fork, ioctl, kill, openpty, read, setsid, waitpid, winsize,
-  write, SIGKILL, SIGTERM, TIOCSWINSZ,
+  _exit, close, dup2, execle, fork, ioctl, kill, openpty, read, setsid, tcgetattr, termios,
+  waitpid, winsize, write, SIGKILL, SIGTERM, SIGWINCH, TIOCSWINSZ, VMIN, VTIME,
 };
 use log::{debug, error, info};
-use napi::{Env, Error as NapiError, JsNumber, JsObject, JsString, Result as NapiResult};
+use napi::{
+  bindgen_prelude::Buffer, Env, Error as NapiError, JsNumber, JsObject, JsString,
+  Result as NapiResult,
+};
 use napi_derive::napi;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::sys::select::{select, FdSet};
+use nix::sys::signal::{self, Signal};
+use nix::sys::time::{TimeVal, TimeValLike};
+use nix::unistd::Pid;
 use std::env;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
+use std::mem::MaybeUninit;
+use std::os::unix::io::BorrowedFd;
 use std::ptr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::task;
 
 extern "C" {
@@ -56,7 +67,7 @@ impl PtyProcess {
       }
       0 => {
         // Child process
-        Self::setup_child(slave_fd).unwrap_or_else(|e| {
+        Self::setup_child(slave_fd, "/bin/bash").unwrap_or_else(|e| {
           error!("Failed to setup child: {}", e);
           std::process::exit(1);
         });
@@ -77,6 +88,88 @@ impl PtyProcess {
     }
   }
 
+  /// Opens a PTY (master and slave) on macOS.
+  ///
+  /// # Returns
+  ///
+  /// A tuple containing the master and slave file descriptors.
+  ///
+  /// # Errors
+  ///
+  /// Returns an `io::Error` if the PTY cannot be opened.
+  fn open_pty() -> io::Result<(i32, i32)> {
+    let mut master_fd: libc::c_int = -1;
+    let mut slave_fd: libc::c_int = -1;
+
+    // Initialize terminal attributes
+    let mut termp: termios = unsafe { std::mem::zeroed() };
+    unsafe {
+        // Get base terminal attributes from stdin if possible
+        if libc::tcgetattr(0, &mut termp) != 0 {
+            // If that fails, set some sensible defaults
+            termp.c_iflag = libc::ICRNL;
+            termp.c_oflag = libc::OPOST | libc::ONLCR;
+            termp.c_lflag = libc::ISIG | libc::ICANON | libc::ECHO |
+                           libc::ECHOE | libc::ECHOK | libc::IEXTEN;
+        }
+
+        // Set input/output speed
+        libc::cfsetispeed(&mut termp, libc::B38400);
+        libc::cfsetospeed(&mut termp, libc::B38400);
+
+        // Set control characters
+        termp.c_cc[VMIN] = 1;
+        termp.c_cc[VTIME] = 0;
+    }
+
+    // Initialize with larger default window size
+    let mut ws = winsize {
+        ws_row: 40,  // Start with our desired size
+        ws_col: 100, // Start with our desired size
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    // Open the PTY
+    let ret = unsafe {
+        openpty(
+            &mut master_fd,
+            &mut slave_fd,
+            std::ptr::null_mut(),
+            &mut termp,
+            &mut ws,
+        )
+    };
+
+    if ret != 0 {
+        let err = io::Error::last_os_error();
+        error!("openpty failed with error: {}", err);
+        return Err(err);
+    }
+
+    // Double-check the window size was set
+    unsafe {
+        // Set size on both master and slave
+        if ioctl(master_fd, TIOCSWINSZ, &ws) != 0 {
+            error!("Failed to set master PTY size");
+            return Err(io::Error::last_os_error());
+        }
+        if ioctl(slave_fd, TIOCSWINSZ, &ws) != 0 {
+            error!("Failed to set slave PTY size");
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    // Set both FDs to non-blocking mode
+    unsafe {
+        let flags = libc::fcntl(master_fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+
+    Ok((master_fd, slave_fd))
+	}
   /// Sends data to the PTY process.
   ///
   /// This function spawns a blocking task to send data to the PTY using the multiplexer.
@@ -84,17 +177,15 @@ impl PtyProcess {
   ///
   /// # Arguments
   ///
+  /// * `multiplexer` - An `Arc` reference to the `Multiplexer`.
   /// * `data` - A byte slice containing the data to send to the PTY.
   ///
   /// # Returns
   ///
   /// Returns `Ok(())` if the data was successfully sent, or an `Err` containing a `napi::Error`.
-  pub async fn send_to_pty(
-    multiplexer: Arc<Multiplexer>,
-    data: napi::bindgen_prelude::Buffer,
-  ) -> napi::Result<()> {
+  pub async fn send_to_pty(multiplexer: Arc<Multiplexer>, data: Buffer) -> napi::Result<()> {
     let data_clone = data.to_vec();
-    let buffer = napi::bindgen_prelude::Buffer::from(data_clone);
+    let buffer = Buffer::from(data_clone);
 
     // Spawn a blocking task to send data to the PTY
     let send_future = task::spawn_blocking(move || {
@@ -113,11 +204,18 @@ impl PtyProcess {
     Ok(())
   }
 
-  pub async fn send_to_pty_js(
-    env: Env,
-    multiplexer: JsObject,
-    data: napi::bindgen_prelude::Buffer,
-  ) -> napi::Result<()> {
+  /// Sends data to the PTY process from JavaScript.
+  ///
+  /// # Arguments
+  ///
+  /// * `env` - The N-API environment.
+  /// * `multiplexer` - The JavaScript object representing the multiplexer.
+  /// * `data` - The data buffer to send.
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(())` if the data was successfully sent, or an `Err` containing a `napi::Error`.
+  pub async fn send_to_pty_js(env: Env, multiplexer: JsObject, data: Buffer) -> napi::Result<()> {
     let multiplexer: Arc<Multiplexer> =
       Arc::new(env.unwrap::<&mut Multiplexer>(&multiplexer)?.clone());
     PtyProcess::send_to_pty(multiplexer, data).await
@@ -127,7 +225,6 @@ impl PtyProcess {
   ///
   /// # Arguments
   ///
-  /// * `env` - A reference to the N-API environment.
   /// * `js_obj` - The JavaScript object containing the process information.
   ///
   /// # Returns
@@ -137,7 +234,7 @@ impl PtyProcess {
   /// # Errors
   ///
   /// Returns a `NapiError` if the object does not contain the required fields or if field extraction fails.
-  pub fn from_js_object(env: &Env, js_obj: &JsObject) -> NapiResult<Self> {
+  pub fn from_js_object(js_obj: &JsObject) -> NapiResult<Self> {
     let pid_js = js_obj.get::<&str, JsNumber>("pid")?;
     let pid = pid_js
       .ok_or_else(|| NapiError::from_reason("Missing 'pid' field"))?
@@ -204,43 +301,6 @@ impl PtyProcess {
     self.multiplexer.clone().into_js_object(env)
   }
 
-  /// Opens a PTY (master and slave) on macOS.
-  ///
-  /// # Returns
-  ///
-  /// A tuple containing the master and slave file descriptors.
-  ///
-  /// # Errors
-  ///
-  /// Returns an `io::Error` if the PTY cannot be opened.
-  fn open_pty() -> io::Result<(i32, i32)> {
-    let mut master_fd: i32 = 0;
-    let mut slave_fd: i32 = 0;
-    let mut ws: winsize = unsafe { std::mem::zeroed() };
-    ws.ws_row = 24;
-    ws.ws_col = 80;
-
-    let ret = unsafe {
-      openpty(
-        &mut master_fd,
-        &mut slave_fd,
-        ptr::null_mut(),
-        ptr::null_mut(),
-        &mut ws,
-      )
-    };
-    if ret != 0 {
-      error!("Failed to open PTY: {}", io::Error::last_os_error());
-      return Err(io::Error::last_os_error());
-    }
-
-    debug!(
-      "Opened PTY master_fd: {}, slave_fd: {}",
-      master_fd, slave_fd
-    );
-    Ok((master_fd, slave_fd))
-  }
-
   /// Sets up the child process after a successful fork.
   ///
   /// This includes creating a new session, setting the slave PTY as the controlling terminal,
@@ -249,6 +309,7 @@ impl PtyProcess {
   /// # Arguments
   ///
   /// * `slave_fd` - The file descriptor for the slave side of the PTY.
+  /// * `shell_path` - The path to the shell executable to execute.
   ///
   /// # Returns
   ///
@@ -257,7 +318,7 @@ impl PtyProcess {
   /// # Errors
   ///
   /// Returns an `io::Error` if any setup step fails.
-  fn setup_child(slave_fd: i32) -> io::Result<()> {
+  fn setup_child(slave_fd: i32, shell_path: &str) -> io::Result<()> {
     debug!("In child process on macOS");
 
     // Create a new session
@@ -284,8 +345,14 @@ impl PtyProcess {
     }
 
     // Execute shell with proper environment and in interactive mode
-    let shell = CString::new("/bin/bash").unwrap();
-    let shell_arg = CString::new("bash").unwrap();
+    let shell = CString::new(shell_path).unwrap();
+    let shell_arg = CString::new(
+      std::path::Path::new(shell_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("shell"),
+    )
+    .unwrap();
     let option_i = CString::new("-i").unwrap(); // Add interactive flag
     unsafe {
       execle(
@@ -360,6 +427,7 @@ impl PtyProcess {
   ///
   /// Returns an `io::Error` if the write operation fails.
   pub fn write_data(&self, data: &Bytes) -> io::Result<usize> {
+    debug!("Writing data to master_fd {}: {:?}", self.master_fd, data);
     let bytes_written = unsafe {
       write(
         self.master_fd,
@@ -369,8 +437,14 @@ impl PtyProcess {
     };
 
     if bytes_written < 0 {
-      Err(io::Error::last_os_error())
+      let err = io::Error::last_os_error();
+      error!("Write failed: {}", err);
+      Err(err)
     } else {
+      debug!(
+        "Wrote {} bytes to master_fd {}",
+        bytes_written, self.master_fd
+      );
       Ok(bytes_written as usize)
     }
   }
@@ -389,6 +463,7 @@ impl PtyProcess {
   ///
   /// Returns an `io::Error` if the read operation fails.
   pub fn read_data(&self, buffer: &mut [u8]) -> io::Result<usize> {
+    debug!("Attempting to read data from master_fd {}", self.master_fd);
     let bytes_read = unsafe {
       read(
         self.master_fd,
@@ -398,9 +473,71 @@ impl PtyProcess {
     };
 
     if bytes_read < 0 {
-      Err(io::Error::last_os_error())
+      let err = io::Error::last_os_error();
+      error!("Read failed: {}", err);
+      Err(err)
     } else {
+      debug!(
+        "Read {} bytes from master_fd {}",
+        bytes_read, self.master_fd
+      );
       Ok(bytes_read as usize)
+    }
+  }
+
+  /// Reads data from the PTY in a non-blocking manner with a timeout.
+  ///
+  /// # Arguments
+  ///
+  /// * `buffer` - A mutable slice to store the read data.
+  /// * `timeout` - The duration to wait for data before timing out.
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(Some(bytes_read))` if data was read, `Ok(None)` if timed out, or `Err` on error.
+  pub fn read_data_non_blocking(
+    &self,
+    buffer: &mut [u8],
+    timeout: Duration,
+  ) -> io::Result<Option<usize>> {
+    // Set the file descriptor to non-blocking
+    let flags = fcntl(self.master_fd, FcntlArg::F_GETFL).map_err(|e| io::Error::from(e))?;
+    let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+    fcntl(self.master_fd, FcntlArg::F_SETFL(new_flags)).map_err(|e| io::Error::from(e))?;
+
+    // Prepare for select
+    let mut read_fds = FdSet::new();
+    read_fds.insert(unsafe { BorrowedFd::borrow_raw(self.master_fd) });
+    let timeout_secs = timeout.as_secs() as i64;
+    let timeout_micros = timeout.subsec_micros() as i64;
+
+    // Create a TimeVal instance using the from_secs and from_micros methods
+    let mut timeval = TimeVal::seconds(timeout_secs) + TimeVal::microseconds(timeout_micros);
+
+    let ready = select(
+      self.master_fd + 1,
+      &mut read_fds,
+      None,
+      None,
+      Some(&mut timeval),
+    )
+    .map_err(|e| io::Error::from(e))?;
+
+    // Restore the file descriptor flags
+    let restored_flags = flags;
+    fcntl(
+      self.master_fd,
+      FcntlArg::F_SETFL(OFlag::from_bits_truncate(restored_flags)),
+    )
+    .map_err(|e| io::Error::from(e))?;
+
+    if ready > 0 && unsafe { read_fds.contains(BorrowedFd::borrow_raw(self.master_fd)) } {
+      // Read available data
+      let bytes_read = self.read_data(buffer)?;
+      Ok(Some(bytes_read))
+    } else {
+      // No data available within timeout
+      Ok(None)
     }
   }
 
@@ -419,17 +556,76 @@ impl PtyProcess {
   ///
   /// Returns an `io::Error` if the resize operation fails.
   pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-    let mut ws: winsize = unsafe { std::mem::zeroed() };
-    ws.ws_col = cols;
-    ws.ws_row = rows;
+    debug!("Attempting to resize PTY to {}x{}", cols, rows);
 
+    let ws = winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    // Set the window size on the master PTY
     let ret = unsafe { ioctl(self.master_fd, TIOCSWINSZ, &ws) };
     if ret != 0 {
-      error!("Failed to resize PTY: {}", io::Error::last_os_error());
-      return Err(io::Error::last_os_error());
+        let err = io::Error::last_os_error();
+        error!("Failed to set window size on master: {}", err);
+        return Err(err);
     }
-    debug!("Successfully resized PTY to cols: {}, rows: {}", cols, rows);
+
+    // Send SIGWINCH to the child process
+    let pid = Pid::from_raw(self.pid);
+    signal::kill(pid, Signal::SIGWINCH).map_err(|e| {
+        error!("Failed to send SIGWINCH: {}", e);
+        io::Error::new(io::ErrorKind::Other, e)
+    })?;
+
+    // Wait for the change to take effect
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Verify the size change
+    let mut current_ws: winsize = unsafe { std::mem::zeroed() };
+    let ret = unsafe { ioctl(self.master_fd, libc::TIOCGWINSZ, &mut current_ws) };
+    if ret != 0 {
+        let err = io::Error::last_os_error();
+        error!("Failed to get current window size: {}", err);
+        return Err(err);
+    }
+
+    if current_ws.ws_row != rows || current_ws.ws_col != cols {
+        error!(
+            "Window size mismatch after resize: got {}x{}, expected {}x{}",
+            current_ws.ws_col, current_ws.ws_row, cols, rows
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Failed to verify window size after resize",
+        ));
+    }
+
+    debug!("Successfully resized PTY to {}x{}", cols, rows);
     Ok(())
+	}
+
+  /// Retrieves the current window size of the PTY.
+  ///
+  /// # Returns
+  ///
+  /// A tuple containing the number of rows and columns.
+  ///
+  /// # Errors
+  ///
+  /// Returns an `io::Error` if the ioctl call fails.
+  pub fn get_window_size(&self) -> io::Result<(u16, u16)> {
+    let mut ws = MaybeUninit::<winsize>::zeroed();
+    let ret = unsafe { ioctl(self.master_fd, libc::TIOCGWINSZ, ws.as_mut_ptr()) };
+    if ret != 0 {
+      let err = io::Error::last_os_error();
+      error!("Failed to get window size: {}", err);
+      return Err(err);
+    }
+    let ws = unsafe { ws.assume_init() };
+    Ok((ws.ws_row, ws.ws_col))
   }
 
   /// Sends a signal to the child process.
@@ -695,6 +891,22 @@ impl PtyProcess {
     }
   }
 
+  /// Retrieves the process ID (PID) of the PTY process.
+  ///
+  /// This function is exposed to JavaScript via N-API.
+  ///
+  /// # Returns
+  ///
+  /// Returns the PID of the PTY process.
+  ///
+  /// # Errors
+  ///
+  /// Returns a `napi::Error` if any error occurs.
+  pub async fn pid(env: &Env, js_obj: &JsObject) -> napi::Result<i32> {
+    let pty_process: &PtyProcess = env.unwrap::<PtyProcess>(js_obj)?;
+    Ok(pty_process.pid)
+  }
+
   /// Spawns a new shell process for the PTY.
   ///
   /// # Arguments
@@ -717,9 +929,6 @@ impl PtyProcess {
     let (new_master_fd, new_slave_fd) = Self::open_pty()?;
     self.master_fd = new_master_fd;
 
-    let shell_cstr = CString::new(shell_path.clone()).unwrap();
-    let shell_arg = CString::new(shell_path.clone()).unwrap();
-
     let pid = unsafe { fork() };
     match pid {
       -1 => {
@@ -732,7 +941,7 @@ impl PtyProcess {
       }
       0 => {
         // Child process
-        Self::setup_child(new_slave_fd).unwrap_or_else(|e| {
+        Self::setup_child(new_slave_fd, &shell_path).unwrap_or_else(|e| {
           error!("Failed to setup child during shell change: {}", e);
           std::process::exit(1);
         });
@@ -759,7 +968,7 @@ impl PtyProcess {
   /// # Errors
   ///
   /// Returns an `io::Error` if checking the process status fails.
-  fn is_running(&self) -> io::Result<bool> {
+  pub fn is_running(&self) -> io::Result<bool> {
     match unsafe { kill(self.pid, 0) } {
       0 => Ok(true),
       -1 => {
@@ -791,8 +1000,10 @@ fn map_to_napi_error<E: std::fmt::Display>(err: E) -> NapiError {
 mod tests {
   use super::*;
   use bytes::Bytes;
+  use serial_test::serial;
   use std::io::{self};
   use std::sync::Once;
+  use std::time::Duration;
 
   static INIT: Once = Once::new();
 
@@ -803,6 +1014,7 @@ mod tests {
   }
 
   #[test]
+  #[serial]
   fn test_pty_process_creation() {
     init_logger();
     // Ensures that PtyProcess::new does not return an error under normal conditions.
@@ -818,6 +1030,7 @@ mod tests {
   }
 
   #[test]
+  #[serial]
   fn test_write_and_read_data() {
     init_logger();
     let mut pty = PtyProcess::new().expect("Failed to create PtyProcess");
@@ -840,64 +1053,62 @@ mod tests {
   }
 
   #[test]
-  fn test_resize_pty() {
-    init_logger();
-    let mut pty = PtyProcess::new().expect("Failed to create PtyProcess");
+	#[serial]
+	fn test_resize_pty() {
+			init_logger();
 
-    let resize_result = pty.resize(100, 40);
-    assert!(resize_result.is_ok());
+			// Create new PTY with explicit size
+			let pty = PtyProcess::new().expect("Failed to create PtyProcess");
 
-    // Read and discard initial output
-    let mut buffer = [0u8; 1024];
-    let _ = pty.read_data(&mut buffer);
+			// Sleep briefly to let the PTY initialize
+			std::thread::sleep(std::time::Duration::from_millis(100));
 
-    // Send command to get terminal size
-    let test_command = Bytes::from("stty size\n");
-    let write_result = pty.write_data(&test_command);
-    assert!(write_result.is_ok());
+			// Get initial size
+			let (initial_rows, initial_cols) = pty.get_window_size()
+					.expect("Failed to get initial window size");
+			debug!("Initial PTY size: {}x{}", initial_cols, initial_rows);
 
-    // Read the output
-    let mut total_output = String::new();
-    for _ in 0..5 {
-      let read_result = pty.read_data(&mut buffer);
-      if read_result.is_ok() {
-        let bytes_read = read_result.unwrap();
-        let output = String::from_utf8_lossy(&buffer[..bytes_read]);
-        total_output.push_str(&output);
-        if total_output.contains('\n') {
-          break;
-        }
-      } else {
-        break;
-      }
-    }
+			// Attempt resize
+			let resize_result = pty.resize(100, 40);
+			if let Err(e) = &resize_result {
+					error!("Resize failed: {}", e);
+					// Get current size for debugging
+					if let Ok((rows, cols)) = pty.get_window_size() {
+							error!("Current size after failed resize: {}x{}", cols, rows);
+					}
+			}
+			assert!(resize_result.is_ok(), "Resize operation failed");
 
-    println!("Terminal size output: '{}'", total_output);
+			// Verify new size
+			let (rows, cols) = pty.get_window_size()
+					.expect("Failed to get window size after resize");
+			assert_eq!(rows, 40, "Wrong number of rows after resize");
+			assert_eq!(cols, 100, "Wrong number of columns after resize");
 
-    // Extract the terminal size from the output
-    let lines: Vec<&str> = total_output.lines().collect();
-    for line in lines {
-      if line.trim().is_empty() || line.contains("stty size") {
-        continue;
-      }
-      if line.contains("40 100") {
-        assert!(true);
-        return;
-      } else {
-        panic!(
-          "Incorrect terminal size after resize. Expected '40 100', got '{}'",
-          line.trim()
-        );
-      }
-    }
+			// Additional verification using stty
+			let mut buffer = [0u8; 1024];
+			pty.write_data(&Bytes::from("stty size\n"))
+					.expect("Failed to write stty command");
 
-    panic!("Terminal size not found in output");
+			// Read with timeout
+			let start = std::time::Instant::now();
+			let mut total_output = String::new();
+			while start.elapsed() < std::time::Duration::from_secs(2) {
+					if let Ok(bytes_read) = pty.read_data(&mut buffer) {
+							let output = String::from_utf8_lossy(&buffer[..bytes_read]);
+							total_output.push_str(&output);
+							if total_output.contains("40 100") {
+									return; // Success
+							}
+					}
+					std::thread::sleep(std::time::Duration::from_millis(50));
+			}
 
-    // Cleanup
-    let _ = pty.shutdown_pty();
-  }
+			panic!("Failed to verify terminal size using stty. Output: {}", total_output);
+	}
 
   #[test]
+  #[serial]
   fn test_set_env() {
     init_logger();
     let mut pty = PtyProcess::new().expect("Failed to create PtyProcess");
@@ -924,6 +1135,7 @@ mod tests {
   }
 
   #[test]
+  #[serial]
   fn test_status() {
     init_logger();
     let mut pty = PtyProcess::new().expect("Failed to create PtyProcess");
@@ -948,6 +1160,7 @@ mod tests {
   }
 
   #[test]
+  #[serial]
   fn test_set_log_level() {
     init_logger();
     let mut pty = PtyProcess::new().expect("Failed to create PtyProcess");
@@ -967,10 +1180,11 @@ mod tests {
     }
 
     // Cleanup
-		let _ = pty.shutdown_pty();
+    let _ = pty.shutdown_pty();
   }
 
   #[test]
+  #[serial]
   fn test_change_shell() {
     init_logger();
     let mut pty = PtyProcess::new().expect("Failed to create PtyProcess");
@@ -997,6 +1211,7 @@ mod tests {
   }
 
   #[test]
+  #[serial]
   fn test_into_js_object_and_from_js_object() {
     use napi::{Env, JsNumber, JsObject as NapiJsObject, JsString};
 
@@ -1013,7 +1228,7 @@ mod tests {
     js_obj.set("master_fd", 5).unwrap();
     js_obj.set("command", "bash").unwrap();
 
-    let pty = PtyProcess::from_js_object(&env, &js_obj).expect("Failed to convert from JsObject");
+    let pty = PtyProcess::from_js_object(&js_obj).expect("Failed to convert from JsObject");
     assert_eq!(pty.pid, 1234);
     assert_eq!(pty.master_fd, 5);
     assert_eq!(pty.command, "bash".to_string());
@@ -1031,65 +1246,73 @@ mod tests {
 
 /// Represents a multiplexer for managing multiple PTY sessions.
 #[derive(Debug, Clone)]
-struct Multiplexer {
+pub struct Multiplexer {
   sessions: std::collections::HashMap<u32, i32>, // Example field: map of session IDs to file descriptors
 }
 
 impl Multiplexer {
-	/// Creates a new Multiplexer instance.
-	pub fn new() -> Self {
-      Multiplexer {
-            sessions: std::collections::HashMap::new(), // Initialize the sessions map
-        }
+  /// Creates a new Multiplexer instance.
+  pub fn new() -> Self {
+    Multiplexer {
+      sessions: std::collections::HashMap::new(), // Initialize the sessions map
+    }
+  }
+
+  /// Sends data to a specific session.
+  ///
+  /// # Arguments
+  ///
+  /// * `session_id` - The ID of the session to send data to.
+  /// * `buffer` - The data buffer to send.
+  ///
+  /// # Returns
+  ///
+  /// Returns `Ok(())` on success or a `napi::Error` on failure.
+  pub fn send_to_session(&self, session_id: u32, buffer: Buffer) -> napi::Result<()> {
+    // Retrieve the file descriptor for the given session_id
+    let fd = self
+      .sessions
+      .get(&session_id)
+      .ok_or_else(|| NapiError::from_reason(format!("Session ID {} not found", session_id)))?;
+
+    // Write the buffer to the file descriptor
+    let bytes_written = unsafe { write(*fd, buffer.as_ptr() as *const libc::c_void, buffer.len()) };
+
+    if bytes_written < 0 {
+      let err = io::Error::last_os_error();
+      error!("Write to session {} failed: {}", session_id, err);
+      return Err(NapiError::from_reason(format!(
+        "Write to session {} failed: {}",
+        session_id, err
+      )));
     }
 
-	/// Sends data to a specific session.
-	///
-	/// # Arguments
-	///
-	/// * `session_id` - The ID of the session to send data to.
-	/// * `buffer` - The data buffer to send.
-	///
-	/// # Returns
-	///
-	/// Returns `Ok(())` on success or a `napi::Error` on failure.
-	pub fn send_to_session(
-		&self,
-		session_id: u32,
-		buffer: napi::bindgen_prelude::Buffer,
-	) -> napi::Result<()> {
-		// Implement the actual sending logic here.
-		// For demonstration, we'll assume it always succeeds.
-		// In a real implementation, you would send the buffer to the specified session.
-		// This might involve writing to a file descriptor, sending over a network, etc.
-		debug!(
-			"Sending data to session {}: {:?}",
-			session_id,
-			buffer.as_ref()
-		);
-		// Simulate sending data
-		Ok(())
-	}
+    debug!(
+      "Successfully sent {} bytes to session {}",
+      bytes_written, session_id
+    );
+    Ok(())
+  }
 
-	/// Converts the `Multiplexer` instance into a JavaScript object.
-	///
-	/// # Arguments
-	///
-	/// * `env` - A reference to the N-API environment.
-	///
-	/// # Returns
-	///
-	/// A `JsObject` representing the `Multiplexer`.
-	///
-	/// # Errors
-	///
-	/// Returns a `NapiError` if the object creation fails.
-	pub fn into_js_object(&self, env: &Env) -> NapiResult<JsObject> {
-		let mut js_obj = env.create_object()?;
-		// Add properties and methods to the JS object as needed
-		// For example, you might expose methods to send or receive data
-		// Here, we'll add a dummy property for demonstration
-		js_obj.set("type", "Multiplexer")?;
-		Ok(js_obj)
-	}
+  /// Converts the `Multiplexer` instance into a JavaScript object.
+  ///
+  /// # Arguments
+  ///
+  /// * `env` - A reference to the N-API environment.
+  ///
+  /// # Returns
+  ///
+  /// A `JsObject` representing the `Multiplexer`.
+  ///
+  /// # Errors
+  ///
+  /// Returns a `NapiError` if the object creation fails.
+  pub fn into_js_object(&self, env: &Env) -> NapiResult<JsObject> {
+    let mut js_obj = env.create_object()?;
+    // Add properties and methods to the JS object as needed
+    // For example, you might expose methods to send or receive data
+    // Here, we'll add a dummy property for demonstration
+    js_obj.set("type", "Multiplexer")?;
+    Ok(js_obj)
+  }
 }
