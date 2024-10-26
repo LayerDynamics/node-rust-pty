@@ -1,6 +1,6 @@
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import { readFileSync } from 'fs';
+import { cpus } from 'os';
+import { join } from 'path';
 
 import * as babel from '@babel/core';
 // @ts-expect-error
@@ -13,7 +13,7 @@ import { green } from 'colorette';
 import { transformSync as transformSyncEsbuild, transform as transformEsbuild } from 'esbuild';
 import * as ts from 'typescript';
 
-const cpuCount = os.cpus().length - 1;
+const cpuCount = cpus().length - 1;
 
 const syncSuite = new Suite('Transform rxjs/AjaxObservable.ts benchmark');
 
@@ -21,8 +21,8 @@ const asyncSuite = new Suite('Transform rxjs/AjaxObservable.ts async benchmark')
 
 const parallelSuite = new Suite('Transform rxjs/AjaxObservable.ts parallel benchmark');
 
-const SOURCE_PATH = path.join(__dirname, '..', 'node_modules', 'rxjs', 'src', 'internal', 'ajax', 'ajax.ts');
-const SOURCE_CODE = fs.readFileSync(SOURCE_PATH, 'utf-8');
+const SOURCE_PATH = join(__dirname, '..', 'node_modules', 'rxjs', 'src', 'internal', 'ajax', 'ajax.ts');
+const SOURCE_CODE = readFileSync(SOURCE_PATH, 'utf-8');
 
 async function run() {
 	let defer: () => void;
