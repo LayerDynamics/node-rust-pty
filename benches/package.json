@@ -5,7 +5,7 @@
   "main": "benchmark.js",
   "scripts": {
     "test": "ava",
-    "benchmark": "node benchmark.js"
+    "benchmark": "node bench-benchmark/benchmark.js"
   },
   "dependencies": {
     "ava": "^3.15.0",
@@ -20,8 +20,17 @@
     ],
     "extensions": [
       "js",
-      "cjs"
+      "cjs",
+      "ts"
     ],
     "timeout": "2m"
+  },
+  "devDependencies": {
+    "@babel/preset-env": "^7.26.0",
+    "@babel/preset-typescript": "^7.26.0",
+    "@types/benchmark": "^2.1.5",
+    "@types/node": "^22.8.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
   }
 }

@@ -1,15 +1,13 @@
 // node-rust-pty/benches/tsconfig.json
 {
-	"extends": "../tsconfig.json",
-	"compilerOptions": {
-		"moduleResolution": "NodeNext",
-		"module": "NodeNext",
-		"outDir": "."
-	},
-	"include": [
-		"."
-	],
-	"exclude": [
-		"lib"
-	]
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "moduleResolution": "NodeNext",
+    "module": "NodeNext",
+    "outDir": ".",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["./bench-swc/index.ts"],
+  "exclude": ["lib", "**/node_modules/**/*", "node_modules/**/*"]
 }

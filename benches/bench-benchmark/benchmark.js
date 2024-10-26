@@ -1,7 +1,7 @@
 /* benches/benchmark.js */
 
 const Benchmark = require('benchmark')
-const pathModule = require('../darwin-x64/index.js') // Adjust the path to your N-API module as necessary
+const pathModule = require('../../darwin-x64/index.js') // Adjust the path to your N-API module as necessary
 const suite = new Benchmark.Suite()
 
 // Helper function to wait for Promises in benchmarks
