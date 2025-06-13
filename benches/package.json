@@ -8,7 +8,7 @@
     "benchmark": "node bench-benchmark/benchmark.js"
   },
   "dependencies": {
-    "ava": "^3.15.0",
+    "ava": "^5.3.0",
     "benchmark": "^2.1.4"
   },
   "ava": {
