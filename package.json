@@ -75,6 +75,6 @@
     "node-rust-pty-win32-x64-msvc": "0.1.0"
   },
   "dependencies": {
-    "snappy": "^7.2.2"
+    "snappy": "^7.3.3"
   }
 }
